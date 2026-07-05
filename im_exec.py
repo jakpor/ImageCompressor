@@ -89,11 +89,13 @@ def compress_dir_proc(
     cmd = [
         str(magick_path), "mogrify",
         "-path", str(output_dir),
+        # resize to 4K (3840x2160) if larger, preserving aspect ratio
         "-resize", "3840x2160^>",
         "-filter", "Triangle",
         "-define", "filter:support=2",
         "-unsharp", "0.25x0.08+8.3+0.045",
         "-dither", "None",
+        # Optimize JPEG and PNG compression settings
         "-quality", str(quality),
         "-define", "jpeg:fancy-upsampling=off",
         "-define", "png:compression-filter=5",

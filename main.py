@@ -1,356 +1,467 @@
-import os
-import tkinter
-import tkinter.messagebox
-import tkinter.filedialog
-from tkinter import StringVar, IntVar
+import signal
 import tkinter as tk
+from tkinter import StringVar, IntVar
 import customtkinter
-from im_exec import compress_dir_jpg
 import threading
-import configparser
+from file_manager import FileManager
+from config_manager import ConfigManager
+from file_table import FileProcessingTable
 
-customtkinter.set_appearance_mode(
-    "System"
-)  # Modes: "System" (standard), "Dark", "Light"
-customtkinter.set_default_color_theme(
-    "green"
-)  # Themes: "blue" (standard), "green", "dark-blue"
+customtkinter.set_appearance_mode("System")
+customtkinter.set_default_color_theme("green")
 
 
-config_path = os.path.abspath("config.ini")
+# Tooltip class for providing hover-over information
+class CTkTooltip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        # Bindowanie zdarzeń najechania myszką
+        self.widget.bind("<Enter>", self.show_tip)
+        self.widget.bind("<Leave>", self.hide_tip)
+
+    def show_tip(self, event=None):
+        if self.tip_window or not self.text:
+            return
+        # Pobieranie pozycji widgetu na ekranie
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + 25
+
+        # Tworzenie małego okna bez obramowania systemowego
+        self.tip_window = tk.Toplevel(self.widget)
+        self.tip_window.wm_overrideredirect(True)
+        self.tip_window.wm_geometry(f"+{x}+{y}")
+
+        # Etykieta z tekstem podpowiedzi (styl dopasowany do ciemnego/jasnego motywu)
+        is_dark = customtkinter.get_appearance_mode() == "Dark"
+        bg_color = "#2b2b2b" if is_dark else "#e5e5e5"
+        fg_color = "white" if is_dark else "black"
+
+        label = tk.Label(
+            self.tip_window,
+            text=self.text,
+            justify="left",
+            background=bg_color,
+            foreground=fg_color,
+            relief="solid",
+            borderwidth=1,
+            font=("Roboto", 10, "italic"),
+            padx=5,
+            pady=3,
+        )
+        label.pack()
+
+    def hide_tip(self, event=None):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
 
 
 class App(customtkinter.CTk):
-
-    WIDTH = 780
-    HEIGHT = 450
+    WIDTH = 900
+    HEIGHT = 700
 
     def __init__(self):
         super().__init__()
         self.threads = []
 
+        self.file_manager = FileManager()
+        self.load_file_config = {}
+
+        # 1. Initialize config manager and load stored settings
+        self.config_manager = ConfigManager()
+        stored_settings = self.config_manager.load_settings()
+
         self.title("Image compressor")
         self.geometry(f"{App.WIDTH}x{App.HEIGHT}")
-        self.protocol(
-            "WM_DELETE_WINDOW", self.on_closing
-        )  # call .on_closing() when app gets closed
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        signal.signal(signal.SIGINT, lambda sig, frame: self.on_closing())
 
-        self.iconbitmap("press.ico")
+        # Try loading icon safely
+        try:
+            self.iconbitmap("press.ico")
+        except Exception:
+            pass
 
-        # ============ create two frames ============
+        # Main Layout Configuration
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=1)  # Table takes up remaining vertical space
 
-        self.frame_top = customtkinter.CTkFrame(
-            master=self, width=180, corner_radius=0
+        # ================= TOP FRAME: Settings & Options =================
+        self.frame_top = customtkinter.CTkFrame(master=self, corner_radius=8)
+        self.frame_top.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
+
+        # Exact column layout rules that force everything to align properly
+        self.frame_top.grid_columnconfigure(0, weight=0, minsize=180)
+        self.frame_top.grid_columnconfigure(1, weight=1)
+        self.frame_top.grid_columnconfigure(2, weight=0)
+
+        # 1. Input Directory
+        self.label_src = customtkinter.CTkLabel(self.frame_top, text="Folder wejściowy:", font=("Roboto", 14))
+        self.label_src.grid(row=0, column=0, pady=8, padx=15, sticky="w")
+
+        # Hooked: Init from config + auto-save trace
+        self.source_dir = StringVar(value=stored_settings["source_dir"])
+        self.source_dir.trace_add("write", lambda *args: self.save_config())
+        self.entry_src = customtkinter.CTkEntry(self.frame_top, textvariable=self.source_dir)
+        self.entry_src.grid(row=0, column=1, pady=8, padx=10, sticky="ew")
+
+        self.btn_src = customtkinter.CTkButton(
+            self.frame_top, text="Przeglądaj...", width=100, command=self.get_source_dir
         )
-        self.frame_top.grid(row=0, column=0, sticky="nswe")
-        # configure grid layout (3x5)
-        self.frame_top.grid_rowconfigure(
-            5, minsize=10
-        )  # empty row with minsize as spacing
-        self.frame_top.columnconfigure(0, weight=2)
-        self.frame_top.columnconfigure(1, weight=3)
-        self.frame_top.columnconfigure(2, weight=1)
+        self.btn_src.grid(row=0, column=2, pady=8, padx=15)
 
-        self.frame_extensions = customtkinter.CTkFrame(
-            master=self, corner_radius=0
+        # 2. Output Directory
+        self.label_out = customtkinter.CTkLabel(self.frame_top, text="Folder wyjściowy:", font=("Roboto", 14))
+        self.label_out.grid(row=1, column=0, pady=8, padx=15, sticky="w")
+
+        # Hooked: Init from config + auto-save trace
+        self.output_dir = StringVar(value=stored_settings["output_dir"])
+        self.output_dir.trace_add("write", lambda *args: self.save_config())
+        self.entry_out = customtkinter.CTkEntry(self.frame_top, textvariable=self.output_dir)
+        self.entry_out.grid(row=1, column=1, pady=8, padx=10, sticky="ew")
+
+        self.btn_out = customtkinter.CTkButton(
+            self.frame_top, text="Przeglądaj...", width=100, command=self.get_output_dir
         )
-        self.frame_extensions.grid(row=1, column=0, sticky="nswe")
-        self.frame_extensions.grid_rowconfigure(1, minsize=20)
-        self.frame_extensions.columnconfigure(0, weight=4)
-        self.frame_extensions.columnconfigure(1, weight=4)
-        self.frame_extensions.columnconfigure(2, weight=4)
+        self.btn_out.grid(row=1, column=2, pady=8, padx=15)
 
-        self.frame_bottom = customtkinter.CTkFrame(master=self)
-        self.frame_bottom.grid(
-            row=2, column=0, sticky="nswe", padx=20, pady=20
+        # === 3. SUBFOLDER STRATEGY & 4. QUALITY SETTINGS (Combined in Row 2) ===
+        # Place the main label directly in column 0 of frame_top for perfect alignment
+        self.label_strat = customtkinter.CTkLabel(self.frame_top, text="Struktura folderów:", font=("Roboto", 14))
+        self.label_strat.grid(row=2, column=0, pady=8, padx=15, sticky="w")
+
+        # Create a container ONLY for the interactive fields to live in column 1 and 2 spanned
+        self.strat_quality_container = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
+        self.strat_quality_container.grid(row=2, column=1, columnspan=2, pady=8, padx=10, sticky="w")
+
+        # Hooked: Init from config + auto-save command callback
+        self.strategy_var = StringVar(value=stored_settings["strategy"])
+        self.combo_strat = customtkinter.CTkComboBox(
+            self.strat_quality_container,
+            values=["zachowaj strukturę podfolderów", "spłaszcz podfoldery", "nie skanuj podfolderów"],
+            variable=self.strategy_var,
+            width=220,
+            command=lambda choice: self.save_config(),
         )
-        self.frame_bottom.grid_rowconfigure(5, minsize=10)
-        self.frame_bottom.columnconfigure((0, 1), weight=1)
-        self.frame_bottom.columnconfigure((2), weight=0)
+        self.combo_strat.pack(side="left", padx=(0, 20))
 
-        ### Parts of upper frame
-
-        self.label_1 = customtkinter.CTkLabel(
-            master=self.frame_top,
-            text="Folder wejściowy: ",
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_1.grid(row=1, column=0, pady=10, padx=10)
-        self.source_dir = StringVar()
-        self.source_dir.set("")
-        self.entry_1 = customtkinter.CTkEntry(
-            master=self.frame_top,
-            width=350,
-            textvariable=self.source_dir,
-            font=("Roboto Medium", -10),
-        )  # font name and size in px
-        self.entry_1.grid(row=1, column=1, pady=10, padx=10)
-
-        self.button_1 = customtkinter.CTkButton(
-            master=self.frame_top,
-            text="Browse",
-            command=self.get_source_dir,
-        )
-        self.button_1.grid(row=1, column=2, pady=10, padx=20)
-
-        self.label_2 = customtkinter.CTkLabel(
-            master=self.frame_top,
-            text="Folder wyjściowy: ",
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_2.grid(row=2, column=0, pady=10, padx=10)
-        self.output_dir = StringVar()
-        self.output_dir.set("")
-        self.entry_2 = customtkinter.CTkEntry(
-            master=self.frame_top,
-            width=350,
-            textvariable=self.output_dir,
-            font=("Roboto Medium", -10),
-        )  # font name and size in px
-        self.entry_2.grid(row=2, column=1, pady=10, padx=10)
-
-        self.button_2 = customtkinter.CTkButton(
-            master=self.frame_top, text="Browse", command=self.get_output_dir
-        )
-        self.button_2.grid(row=2, column=2, pady=10, padx=20)
-
+        # --- Quality Settings inside the same horizontal pack layout ---
         self.label_quality = customtkinter.CTkLabel(
-            master=self.frame_top,
-            text="Jakość [1-100]: ",
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_quality.grid(row=3, column=0, pady=10, padx=10)
-        self.quality = IntVar()
-        self.last_quality = 1
-        self.quality.trace(
-            "w",
-            lambda name, index, mode, sv=self.quality: self.validate_quality(),
+            self.strat_quality_container, text="Jakość [1-100]:", font=("Roboto", 14)
         )
+        self.label_quality.pack(side="left", padx=(0, 5))
+
+        # Hooked: Init from config + strict range trace that automatically invokes save_config
+        self.quality = IntVar(value=int(stored_settings["quality"]))
+        self.quality.trace_add("write", lambda *args: self.validate_quality())
+
         self.slider_quality = customtkinter.CTkSlider(
-            master=self.frame_top, from_=1, to=100, variable=self.quality
+            self.strat_quality_container, from_=1, to=100, variable=self.quality, width=150
         )
-        self.slider_quality.bind("<ButtonRelease-1>", self.save_config)
-        self.slider_quality.grid(
-            row=3, column=1, pady=10, padx=20, sticky=tk.EW
-        )
-        self.entry_quality = customtkinter.CTkEntry(
-            master=self.frame_top,
-            width=100,
-            textvariable=self.quality,
-            font=("Roboto Medium", -10),
-        )  # font name and size in px
+        self.slider_quality.pack(side="left", padx=5)
 
-        self.entry_quality.grid(row=3, column=2, pady=10)
+        self.entry_quality = customtkinter.CTkEntry(self.strat_quality_container, width=50, textvariable=self.quality)
+        self.entry_quality.pack(side="left", padx=(5, 0))
 
-        ### Extensions
-        self.check_jpg_var = customtkinter.BooleanVar()
-        self.check_jpg = customtkinter.CTkCheckBox(
-            master=self.frame_extensions,
-            text=".jpg",
-            command=self.save_config,
-            variable=self.check_jpg_var,
-        )
-        self.check_jpg.grid(row=1, column=0, pady=10, padx=20)
-        self.check_jpeg_var = customtkinter.BooleanVar()
-        self.check_jpeg = customtkinter.CTkCheckBox(
-            master=self.frame_extensions,
-            text=".jpeg",
-            command=self.save_config,
-            variable=self.check_jpeg_var,
-        )
-        self.check_jpeg.grid(row=1, column=1, pady=10, padx=20)
-        self.check_png_var = customtkinter.BooleanVar()
-        self.check_png = customtkinter.CTkCheckBox(
-            master=self.frame_extensions,
-            text=".png",
-            command=self.save_config,
-            variable=self.check_png_var,
-        )
-        self.check_png.grid(row=1, column=2, pady=10, padx=20)
+        # === 5. OUTPUT RESOLUTION (Shifted to Row 3) ===
 
-        ### Parts of bottom frame
+        self.label_res = customtkinter.CTkLabel(self.frame_top, text="Rozdzielczość maksymalna:", font=("Roboto", 14))
+        self.label_res.grid(row=3, column=0, pady=8, padx=15, sticky="w")
+
+        # Container frame to align dropdown, custom inputs and checkbox horizontally
+        self.res_container = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
+        self.res_container.grid(row=3, column=1, columnspan=2, pady=8, padx=10, sticky="w")
+
+        # Hooked: Init from config + redirection command
+        self.res_option_var = StringVar(value=stored_settings.get("resolution_preset", "4K:3840x2560"))
+        self.combo_res = customtkinter.CTkComboBox(
+            self.res_container,
+            values=["4K:3840x2560", "2K:2160x1440", "1080x720", "Własna (Szer x Wys)"],
+            variable=self.res_option_var,
+            command=self.on_resolution_changed,
+            width=180,
+        )
+        self.combo_res.pack(side="left")
+
+        # Custom Resolution Input frame (inside the horizontal container)
+        self.custom_res_frame = customtkinter.CTkFrame(self.res_container, fg_color="transparent")
+        self.custom_res_frame.pack(side="left", padx=15)
+
+        # Hooked: Width text field + auto-save trace
+        self.custom_w_var = StringVar(value=stored_settings.get("custom_w", "1920"))
+        self.custom_w_var.trace_add("write", lambda *args: self.save_config())
+        self.custom_w = customtkinter.CTkEntry(
+            self.custom_res_frame, width=60, placeholder_text="W", textvariable=self.custom_w_var
+        )
+        self.custom_w.pack(side="left", padx=2)
+
+        self.label_x = customtkinter.CTkLabel(self.custom_res_frame, text="x")
+        self.label_x.pack(side="left", padx=2)
+
+        # Hooked: Height text field + auto-save trace
+        self.custom_h_var = StringVar(value=stored_settings.get("custom_h", "1080"))
+        self.custom_h_var.trace_add("write", lambda *args: self.save_config())
+        self.custom_h = customtkinter.CTkEntry(
+            self.custom_res_frame, width=60, placeholder_text="H", textvariable=self.custom_h_var
+        )
+        self.custom_h.pack(side="left", padx=2)
+
+        # Hooked: Run visibility update on startup based on loaded preferences
+        self.toggle_custom_res(self.res_option_var.get())
+
+        # ================= Options Checkboxes Container =================
+        self.frame_checkboxes = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
+        self.frame_checkboxes.grid(row=5, column=1, columnspan=2, pady=(4, 8), padx=10, sticky="w")
+
+        # 6. Checkbox - copy all files, including uncompressible ones
+        initial_cb_value = stored_settings.get("copy_uncompressible", "False") == "True"
+        self.copy_uncompressible_var = tk.BooleanVar(value=initial_cb_value)
+        self.cb_copy_uncompressible = customtkinter.CTkCheckBox(
+            self.frame_checkboxes,
+            text="Kopiuj niekompresowalne pliki",
+            variable=self.copy_uncompressible_var,
+            command=self.save_config,
+            font=("Roboto", 12),
+        )
+        self.cb_copy_uncompressible.pack(side="left", padx=(0, 25))
+        CTkTooltip(
+            self.cb_copy_uncompressible,
+            "Zaznacz by skopiować wszystkie pliki, nawet te, których nie można skompresować",
+        )
+
+        # 7. Checkbox - overwrite existing output files
+        initial_overwrite_value = stored_settings.get("overwrite_files", "False") == "True"
+        self.overwrite_files_var = tk.BooleanVar(value=initial_overwrite_value)
+        self.cb_overwrite_files = customtkinter.CTkCheckBox(
+            self.frame_checkboxes,
+            text="Nadpisz pliki w folderze wyjściowym",
+            variable=self.overwrite_files_var,
+            command=self.save_config,
+            font=("Roboto", 12),
+        )
+        self.cb_overwrite_files.pack(side="left", padx=0)
+        CTkTooltip(self.cb_overwrite_files, "Zaznacz by nadpisać już skompresowane pliki w folderze wyjściowym")
+
+        # ================= CONTROLS FRAME =================
+        self.frame_controls = customtkinter.CTkFrame(master=self, fg_color="transparent")
+        self.frame_controls.grid(row=1, column=0, sticky="ew", padx=15, pady=(5, 10))
+        self.frame_controls.columnconfigure((0, 1), weight=1)
+
+        # Big, prominent action buttons
+        self.btn_load = customtkinter.CTkButton(
+            self.frame_controls,
+            text="Wczytaj pliki",
+            height=45,
+            font=("Roboto", 15, "bold"),
+            fg_color="green",
+            hover_color="darkgreen",
+            command=self.load_files_btn,
+        )
+        self.btn_load.grid(row=0, column=0, pady=5, padx=(0, 10), sticky="ew")
 
         self.btn_start_comp = customtkinter.CTkButton(
-            master=self.frame_bottom,
+            self.frame_controls,
             text="Kompresuj",
+            height=45,
+            font=("Roboto", 15, "bold"),
+            fg_color="green",
+            hover_color="darkgreen",
             command=self.compress_images_btn,
         )
-        self.btn_start_comp.grid(
-            row=1, column=0, columnspan=3, pady=10, padx=20
-        )
-        self.btn_stop_comp = customtkinter.CTkButton(
-            master=self.frame_bottom,
-            text="STOP",
-            fg_color="red",
-            hover_color="darkred",
-        )
-        self.btn_stop_comp.grid(
-            row=1, column=4, columnspan=1, pady=10, padx=20
-        )
-        self.btn_stop_comp.grid_forget()
+        self.btn_start_comp.grid(row=0, column=1, pady=5, padx=(10, 0), sticky="ew")
 
-        self.label_3 = customtkinter.CTkLabel(
-            master=self.frame_bottom,
-            text="Aktualny plik: ",
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_3.grid(row=2, column=0, pady=10, padx=10)
-        self.current_file = StringVar()
-        self.current_file.set("")
-        self.entry_3 = customtkinter.CTkEntry(
-            master=self.frame_bottom,
-            textvariable=self.current_file,
-            width=200,
-            font=("Roboto Medium", -16),
-            state=tkinter.DISABLED,
-        )  # font name and size in px
-        self.entry_3.grid(row=2, column=1, columnspan=2, pady=10, padx=10)
+        # ================= FILE SELECTION FILTER ROW (Row 2) =================
+        # Placed after control frame, directly before the file frame
+        self.frame_filter = customtkinter.CTkFrame(master=self, corner_radius=8)
+        self.frame_filter.grid(row=2, column=0, sticky="ew", padx=15, pady=(5, 10))
 
-        self.progressbar = customtkinter.CTkProgressBar(
-            master=self.frame_bottom
+        # Enforce exact label column alignment to match top settings margins
+        self.frame_filter.grid_columnconfigure(0, weight=0, minsize=180)
+        self.frame_filter.grid_columnconfigure(1, weight=1)
+
+        self.label_filter = customtkinter.CTkLabel(self.frame_filter, text="Wyświetl pliki:", font=("Roboto", 14))
+        self.label_filter.grid(row=0, column=0, pady=10, padx=15, sticky="w")
+
+        # Container framework to map checkboxes inline horizontally
+        self.filter_container = customtkinter.CTkFrame(self.frame_filter, fg_color="transparent")
+        self.filter_container.grid(row=0, column=1, pady=10, padx=10, sticky="w")
+
+        # State tracking configurations for functional table view hooks
+        initial_show_convertible = stored_settings.get("show_convertible", "False") == "True"
+        initial_show_non_convertible = stored_settings.get("show_non_convertible", "False") == "True"
+        initial_show_converted = stored_settings.get("show_converted", "False") == "True"
+        self.show_convertible = customtkinter.BooleanVar(value=initial_show_convertible)
+        self.show_non_convertible = customtkinter.BooleanVar(value=initial_show_non_convertible)
+        self.show_converted = customtkinter.BooleanVar(value=initial_show_converted)
+
+        self.chk_convertible = customtkinter.CTkCheckBox(
+            self.filter_container, text="konwertowalne", variable=self.show_convertible, command=self.on_filter_changed
         )
-        self.progressbar.grid(
-            row=4, column=0, columnspan=2, sticky="ew", padx=15, pady=15
+        self.chk_convertible.pack(side="left", padx=(0, 15))
+
+        self.chk_non_convertible = customtkinter.CTkCheckBox(
+            self.filter_container,
+            text="niekonwertowalne",
+            variable=self.show_non_convertible,
+            command=self.on_filter_changed,
         )
-        self.current_no = StringVar()
-        self.current_no.set("")
-        self.label_4 = customtkinter.CTkLabel(
-            master=self.frame_bottom,
-            textvariable=self.current_no,
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_4.grid(row=4, column=2, pady=10, padx=10)
+        self.chk_non_convertible.pack(side="left", padx=15)
 
-        self.error_var = StringVar()
-        self.error_var.set("")
-        self.label_5 = customtkinter.CTkLabel(
-            master=self.frame_bottom,
-            textvariable=self.error_var,
-            font=("Roboto Medium", -16),
-        )  # font name and size in px
-        self.label_5.grid(row=5, column=0, pady=10, padx=10)
+        self.chk_converted = customtkinter.CTkCheckBox(
+            self.filter_container, text="skonwertowane", variable=self.show_converted, command=self.on_filter_changed
+        )
+        self.chk_converted.pack(side="left", padx=15)
 
+        # ================= MIDDLE FRAME: File Table =================
+        # Row layout configuration update: row 3 is now the table
+        self.grid_rowconfigure(3, weight=1)
+
+        self.frame_middle = customtkinter.CTkFrame(master=self, corner_radius=8)
+        self.frame_middle.grid(row=3, column=0, sticky="nsew", padx=15, pady=0)
+        self.frame_middle.grid_rowconfigure(0, weight=1)
+        self.frame_middle.grid_columnconfigure(0, weight=1)
+
+        # Inicjalizacja nowej tabeli wewnątrz środkowej ramki
+        self.table = FileProcessingTable(master=self.frame_middle)
+        self.table.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+
+        # ================= BOTTOM FRAME: Status Bar (At the very bottom) =================
+        # Row layout configuration update: row 4 is the thin status bar
+        self.grid_rowconfigure(4, weight=0)
+
+        self.frame_bottom = customtkinter.CTkFrame(master=self, height=50, corner_radius=8)
+        self.frame_bottom.grid(row=4, column=0, sticky="ew", padx=15, pady=15)
+        self.frame_bottom.columnconfigure(0, weight=1)
+
+        # Progress bar integrated cleanly into the status area
+        self.progressbar = customtkinter.CTkProgressBar(self.frame_bottom)
+        self.progressbar.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 5))
         self.progressbar.set(0)
-        self.set_from_config()
 
-    def validate_quality(self):
-        q = self.quality.get()
-        if q:
-            try:
-                q = int(q)
-                if q > 0 and q <= 100:
-                    self.quality.set(q)
-                    self.last_quality = q
-                    return True
-                else:
-                    self.quality.set(self.last_quality)
-                    return False
-            except ValueError:
-                self.quality.set(self.last_quality)
-                return False
-        else:
-            self.quality.set(self.last_quality)
-            return False
-
-    def get_source_dir(self):
-        self.source_dir.set(
-            tkinter.filedialog.askdirectory(title="Source image directory")
+        # Status Label acting as Status Bar
+        self.status_var = StringVar(value="Gotowy")
+        self.status_bar = customtkinter.CTkLabel(
+            self.frame_bottom, textvariable=self.status_var, font=("Roboto", 11), text_color="gray"
         )
-        self.save_config()
+        self.status_bar.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 5))
+
+    # ================= LOGIC & UTILITIES =================
+    def get_source_dir(self):
+        path = customtkinter.filedialog.askdirectory()
+        if path:
+            self.source_dir.set(path)
 
     def get_output_dir(self):
-        self.output_dir.set(
-            tkinter.filedialog.askdirectory(title="Output image directory")
-        )
+        path = customtkinter.filedialog.askdirectory()
+        if path:
+            self.output_dir.set(path)
+
+    def validate_quality(self):
+        try:
+            val = self.quality.get()
+            if val < 1:
+                self.quality.set(1)
+            elif val > 100:
+                self.quality.set(100)
+        except tk.TclError:
+            return  # Allow blank temporary values while typing
         self.save_config()
 
-    def compress_images_btn(self):
-        if len(self.output_dir.get()) > 0 and len(self.source_dir.get()) > 0:
-            self.progressbar.set(0)
-            self.error_var.set("")
-            x = threading.Thread(target=self.compress_images_thread)
-            self.threads.append(x)
-            x.start()
+    def on_resolution_changed(self, choice):
+        self.toggle_custom_res(choice)
+        self.save_config()
 
-    def compress_images_thread(self):
-        self.btn_start_comp.configure(state=tkinter.DISABLED)
-        self.btn_stop_comp.grid(
-            row=1, column=2, pady=10, padx=20
+    def toggle_custom_res(self, choice):
+        if choice == "Własna (Szer x Wys)":
+            self.custom_res_frame.pack(side="left", padx=15)
+        else:
+            self.custom_res_frame.pack_forget()
+
+    def on_filter_changed(self):
+        # Read current checkbox states (True/False)
+        show_conv = self.show_convertible.get()
+        show_non_conv = self.show_non_convertible.get()
+        show_converted = self.show_converted.get()
+
+        filtered_ui_data = self.file_manager.get_ui_table_data(
+            show_conv=show_conv, show_non_conv=show_non_conv, show_done=show_converted
         )
+
+        self.table.populate_data(filtered_ui_data)
+
+        self.status_var.set(self.file_manager.get_statistics_summary())
+
+    def save_config(self):
         try:
-            extensions = []
-            if self.check_jpg_var.get():
-                extensions.append(".jpg")
-            if self.check_jpeg_var.get():
-                extensions.append(".jpeg")
-            if self.check_png_var.get():
-                extensions.append(".png")
-            compress_dir_jpg(
-                source_dir=self.source_dir.get(),
-                output_dir=self.output_dir.get(),
-                quality=self.quality.get(),
-                label_var=self.current_file,
-                label_current_no=self.current_no,
-                progress_bar_fn=self.progressbar.set,
-                compress_btn_handle=self.btn_start_comp,
-                stop_btn_handle=self.btn_stop_comp,
-                error_var=self.error_var,
-                extension=extensions,
+            current_settings = {
+                "source_dir": self.source_dir.get(),
+                "output_dir": self.output_dir.get(),
+                "strategy": self.strategy_var.get(),
+                "quality": str(self.quality.get()),
+                "resolution_preset": self.res_option_var.get(),
+                "custom_w": self.custom_w_var.get(),
+                "custom_h": self.custom_h_var.get(),
+                "copy_uncompressible": str(self.copy_uncompressible_var.get()),
+                "overwrite_files": str(self.overwrite_files_var.get()),
+                "show_convertible": str(self.show_convertible.get()),
+                "show_non_convertible": str(self.show_non_convertible.get()),
+                "show_converted": str(self.show_converted.get()),
+            }
+            self.config_manager.save_settings(current_settings)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def load_files_btn(self):
+        src = self.source_dir.get()
+        dest = self.output_dir.get()
+        strat = self.strategy_var.get()
+
+        self.load_file_config = {"source_dir": src, "output_dir": dest, "strategy": strat}
+
+        if not src:
+            self.status_var.set("Błąd: Wybierz najpierw folder wejściowy!")
+            return
+        if not dest:
+            self.status_var.set("Błąd: Wybierz najpierw folder wyjściowy!")
+            return
+
+        self.status_var.set("Skanowanie katalogu...")
+
+        # Run filesystem scanning on a background thread so UI stays fluid
+        def async_scan():
+            self.file_manager.scan_directory(src, strat, dest)
+
+            # Update UI components safely back on the main loop thread
+            self.after(
+                0,
+                lambda: self.table.populate_data(
+                    self.file_manager.get_ui_table_data(
+                        show_conv=self.show_convertible.get(),
+                        show_non_conv=self.show_non_convertible.get(),
+                        show_done=self.show_converted.get(),
+                    )
+                ),
             )
-        except Exception:
-            self.btn_start_comp.configure(state=tkinter.NORMAL)
-            self.btn_stop_comp.grid_forget()
 
-    def set_from_config(self):
-        config = configparser.ConfigParser()
-        if os.path.exists(config_path):
-            config.read(config_path)
-        else:
-            config.add_section("Main")
-            config["Main"]["last_source_dir"] = ""
-            config["Main"]["last_output_dir"] = ""
-            config["Main"]["quality"] = str(80)
-            config["Main"]["check_png"] = str(True)
-            config["Main"]["check_jpg"] = str(True)
-            config["Main"]["check_jpeg"] = str(True)
-        self.source_dir.set(config["Main"]["last_source_dir"])
-        self.output_dir.set(config["Main"]["last_output_dir"])
-        self.quality.set(int(config["Main"]["quality"]))
-        self.check_png_var.set(config["Main"]["check_png"] == "True")
-        self.check_jpeg_var.set(config["Main"]["check_jpeg"] == "True")
-        self.check_jpg_var.set(config["Main"]["check_jpg"] == "True")
+            self.after(0, lambda: self.status_var.set(self.status_var.set(self.file_manager.get_statistics_summary())))
 
-    def save_config(self, *args):
-        config = configparser.ConfigParser()
-        if os.path.exists(config_path):
-            config.read(config_path)
+        threading.Thread(target=async_scan, daemon=True).start()
 
-        else:
-            config.add_section("Main")
+    def compress_images_btn(self):
+        if (
+            self.load_file_config.get("source_dir") != self.source_dir.get()
+            or self.load_file_config.get("output_dir") != self.output_dir.get()
+            or self.load_file_config.get("strategy") != self.strategy_var.get()
+        ):
+            self.load_files_btn()  # Refresh file list if directories or strategy changed
 
-        config["Main"]["last_source_dir"] = self.source_dir.get()
-        config["Main"]["last_output_dir"] = self.output_dir.get()
-        config["Main"]["quality"] = str(self.quality.get())
-        config["Main"]["check_png"] = str(self.check_png_var.get())
-        config["Main"]["check_jpg"] = str(self.check_jpg_var.get())
-        config["Main"]["check_jpeg"] = str(self.check_jpeg_var.get())
-        with open(config_path, "w") as configfile:
-            config.write(configfile)
+        self.status_var.set("Trwa kompresowanie...")
 
-    def on_closing(self, event=0):
-        for thread in self.threads:
-            thread.join()
+    def on_closing(self):
+        self.save_config()  # Final save execution guard
         self.destroy()
-
-
-def widget_show(widget: customtkinter.CTkButton):
-    widget.grid()
-
-
-def widget_hide(widget: customtkinter.CTkButton):
-    widget.grid_forget()
 
 
 if __name__ == "__main__":
