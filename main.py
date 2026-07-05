@@ -1,5 +1,6 @@
 import signal
 import os
+import queue
 import tkinter as tk
 from tkinter import StringVar, IntVar
 import customtkinter
@@ -86,6 +87,7 @@ class App(customtkinter.CTk):
         try:
             self.iconbitmap("press.ico")
         except Exception:
+            print("Error loading icon.")
             pass
 
         # Initialize compressor
@@ -173,7 +175,6 @@ class App(customtkinter.CTk):
         self.entry_quality.pack(side="left", padx=(5, 0))
 
         # === 5. OUTPUT RESOLUTION (Shifted to Row 3) ===
-
         self.label_res = customtkinter.CTkLabel(self.frame_top, text="Rozdzielczość maksymalna:", font=("Roboto", 14))
         self.label_res.grid(row=3, column=0, pady=8, padx=15, sticky="w")
 
@@ -181,7 +182,7 @@ class App(customtkinter.CTk):
         self.res_container = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
         self.res_container.grid(row=3, column=1, columnspan=2, pady=8, padx=10, sticky="w")
 
-        # Hooked: Init from config + redirection command
+        # Resolution dropdown selection
         self.res_option_var = StringVar(value=stored_settings.get("resolution_preset", "4K:3840x2560"))
         self.combo_res = customtkinter.CTkComboBox(
             self.res_container,
@@ -196,7 +197,7 @@ class App(customtkinter.CTk):
         self.custom_res_frame = customtkinter.CTkFrame(self.res_container, fg_color="transparent")
         self.custom_res_frame.pack(side="left", padx=15)
 
-        # Hooked: Width text field + auto-save trace
+        # Width input field
         self.custom_w_var = StringVar(value=stored_settings.get("custom_w", "1920"))
         self.custom_w_var.trace_add("write", lambda *args: self.save_config())
         self.custom_w = customtkinter.CTkEntry(
@@ -207,7 +208,7 @@ class App(customtkinter.CTk):
         self.label_x = customtkinter.CTkLabel(self.custom_res_frame, text="x")
         self.label_x.pack(side="left", padx=2)
 
-        # Hooked: Height text field + auto-save trace
+        # Height input field
         self.custom_h_var = StringVar(value=stored_settings.get("custom_h", "1080"))
         self.custom_h_var.trace_add("write", lambda *args: self.save_config())
         self.custom_h = customtkinter.CTkEntry(
@@ -215,8 +216,21 @@ class App(customtkinter.CTk):
         )
         self.custom_h.pack(side="left", padx=2)
 
-        # Hooked: Run visibility update on startup based on loaded preferences
+        # Run visibility update on startup based on loaded preferences
         self.toggle_custom_res(self.res_option_var.get())
+
+        # --- WORKERS SECTION (Moved next to resolution container) ---
+        # Label for the worker input field
+        self.worker_count_label = customtkinter.CTkLabel(self.res_container, text="Wątki:", font=("Roboto", 14))
+        self.worker_count_label.pack(side="left", padx=(25, 5))
+
+        # Hooked: Worker text field + auto-save trace
+        self.worker_count_var = StringVar(value=stored_settings.get("worker_count", "4"))
+        self.worker_count_var.trace_add("write", lambda *args: self.save_config())
+        self.worker_count_entry = customtkinter.CTkEntry(
+            self.res_container, width=45, textvariable=self.worker_count_var
+        )
+        self.worker_count_entry.pack(side="left", padx=2)
 
         # ================= Options Checkboxes Container =================
         self.frame_checkboxes = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
@@ -361,6 +375,12 @@ class App(customtkinter.CTk):
         self.progressbar = customtkinter.CTkProgressBar(self.frame_bottom)
         self.progressbar.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 5))
         self.progressbar.set(0)
+        self.scan_in_progress = False
+        self.compress_in_progress = False
+        self.ui_queue = queue.Queue()
+        self._ui_queue_active = False
+        self._processed_file_count = 0
+        self._total_files_to_process = 0
 
         # Status Label acting as Status Bar
         self.status_var = StringVar(value="Gotowy")
@@ -430,10 +450,12 @@ class App(customtkinter.CTk):
                 "show_convertible": str(self.show_convertible.get()),
                 "show_non_convertible": str(self.show_non_convertible.get()),
                 "show_converted": str(self.show_converted.get()),
-                "remove_metadata": str(self.remove_metadata.get()),
+                "remove_metadata": str(self.remove_metadata_var.get()),
+                "worker_count": self.worker_count_var.get(),
             }
             self.config_manager.save_settings(current_settings)
-        except (tk.TclError, AttributeError):
+        except (tk.TclError, AttributeError) as error:
+            print("Error saving config: Invalid value in one of the fields. {}".format(error))
             pass
 
     def load_files_btn(self):
@@ -450,27 +472,32 @@ class App(customtkinter.CTk):
             self.status_var.set("Błąd: Wybierz najpierw folder wyjściowy!")
             return
 
+        self.scan_in_progress = True
+        self.progressbar.set(0)
         self.status_var.set("Skanowanie katalogu...")
+        self.table.clear_table()
 
-        # Run filesystem scanning on a background thread so UI stays fluid
+        def progress_callback(batch):
+            self._queue_ui_update("scan_batch", batch)
+
         def async_scan():
-            self.file_manager.scan_directory(src, strat, dest)
-
-            # Update UI components safely back on the main loop thread
-            self.after(
-                0,
-                lambda: self.table.populate_data(
-                    self.file_manager.get_ui_table_data(
-                        show_conv=self.show_convertible.get(),
-                        show_non_conv=self.show_non_convertible.get(),
-                        show_done=self.show_converted.get(),
-                    )
-                ),
-            )
-
-            self.after(0, lambda: self.status_var.set(self.status_var.set(self.file_manager.get_statistics_summary())))
+            try:
+                self.file_manager.scan_directory(src, strat, dest, progress_callback=progress_callback, batch_size=25)
+            finally:
+                self._queue_ui_update("scan_complete", None)
 
         threading.Thread(target=async_scan, daemon=True).start()
+
+    def _refresh_table_from_batch(self, batch):
+        if not batch:
+            return
+        self.table.update_rows_from_entries(batch)
+        self.status_var.set(self.file_manager.get_statistics_summary())
+
+    def _finalize_scan(self):
+        self.scan_in_progress = False
+        self.progressbar.set(1)
+        self.status_var.set(self.file_manager.get_statistics_summary())
 
     def compress_images_btn(self):
         if (
@@ -495,35 +522,65 @@ class App(customtkinter.CTk):
             "strip_metadata": strip_metadata,
             "copy_uncompressible": copy_uncompressible,
             "override_files": overwrite_files,
+            "worker_count": int(self.worker_count_var.get()),
         }
         files_to_process = self.file_manager.get_files_for_compressor()
+        self._processed_file_count = 0
+        self._total_files_to_process = len(files_to_process)
+        self.progressbar.set(0)
+        self.compress_in_progress = True
 
-        # Define the background worker process
         def worker():
             self.compressor.compress_files_list(
                 files_list=files_to_process, config=config, progress_callback=self._on_file_processed_callback
             )
-            self.status_var.set("Kompresja zakończona pomyślnie!")
+            self._queue_ui_update("compression_complete", None)
 
-        # Start thread execution layout
         threading.Thread(target=worker, daemon=True).start()
-
         self.status_var.set("Trwa kompresowanie...")
 
-    def _on_file_processed_callback(self, filename: str, status: FileStatus):
-        self.file_manager.update_file_status(filename, status)
-        # self.table.populate_data(
-        #     self.file_manager.get_ui_table_data(
-        #         show_conv=self.show_convertible.get(),
-        #         show_non_conv=self.show_non_convertible.get(),
-        #         show_done=self.show_converted.get(),
-        #     )
-        # )
-        self.status_var.set(self.file_manager.get_statistics_summary())
-        self.update_idletasks()
+    def _on_file_processed_callback(self, source_path, status: FileStatus):
+        self._queue_ui_update("file_status", (str(source_path), status))
+
+    def _queue_ui_update(self, event_type, payload):
+        self.ui_queue.put((event_type, payload))
+        if not self._ui_queue_active:
+            self._ui_queue_active = True
+            self.after(0, self._process_ui_queue)
+
+    def _process_ui_queue(self):
+        while True:
+            try:
+                event_type, payload = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if event_type == "scan_batch":
+                self._refresh_table_from_batch(payload)
+            elif event_type == "scan_complete":
+                self._finalize_scan()
+            elif event_type == "file_status":
+                source_path, status = payload
+                self.file_manager.update_file_status(source_path, status)
+                row_data = self.file_manager.get_file_entry(source_path)
+                if row_data is not None:
+                    self.table.update_rows_from_entries([row_data])
+                self._processed_file_count += 1
+                if self._total_files_to_process:
+                    self.progressbar.set(self._processed_file_count / self._total_files_to_process)
+                self.status_var.set(self.file_manager.get_statistics_summary())
+            elif event_type == "compression_complete":
+                self.compress_in_progress = False
+                self.progressbar.set(1)
+                self.status_var.set("Kompresja zakończona pomyślnie!")
+
+        if self.scan_in_progress or self.compress_in_progress:
+            self.after(25, self._process_ui_queue)
+        else:
+            self._ui_queue_active = False
 
     def on_closing(self):
-        self.save_config()  # Final save execution guard
+        self.save_config()
         self.destroy()
 
 

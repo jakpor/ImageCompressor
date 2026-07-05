@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 from pathlib import Path
 from definitions import FileStatus, SUPPORTED_EXTENSIONS, STRATEGY_MAPPING
@@ -218,27 +219,27 @@ class ImageCompressor:
 
     def compress_files_list(self, files_list: list, config: dict, progress_callback=None) -> None:
         """Processes a master list layout row items using registered strategy configurations."""
-        import shutil
-
         copy_uncompressible = config.get("copy_uncompressible", False)
         override_files = config.get("override_files", False)
+        worker_count = max(1, int(config.get("worker_count", 4)))
 
-        for file_info in files_list:
+        def process_file(file_info: dict):
             current_status = file_info.get("status")
 
             if current_status == FileStatus.DONE:
-                continue
+                return
 
             if not override_files and current_status in {
                 FileStatus.EXISTING_PENDING,
                 FileStatus.EXISTING_UNCONVERTIBLE,
             }:
                 print(f"Skipping existing file (overwrite disabled): {file_info['filename']}")
-                continue
+                if progress_callback:
+                    progress_callback(Path(file_info["source_path"]), current_status)
+                return
 
             source_path = Path(file_info["source_path"])
             output_path = Path(file_info["destination"])
-
             output_path.parent.mkdir(parents=True, exist_ok=True)
             strategy = self._get_strategy_for_file(source_path)
 
@@ -263,8 +264,14 @@ class ImageCompressor:
                         print(f"Error copying file {source_path.name}: {e}")
                         if progress_callback:
                             progress_callback(source_path, FileStatus.ERROR_COPY)
-            if progress_callback:
-                progress_callback(source_path, FileStatus.DONE)
+                else:
+                    if progress_callback:
+                        progress_callback(source_path, FileStatus.UNCONVERTIBLE)
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(process_file, file_info) for file_info in files_list]
+            for future in futures:
+                future.result()
 
 
 def create_configured_compressor():

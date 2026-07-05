@@ -8,12 +8,20 @@ class FileManager:
         # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ... }
         self.files = []
 
-    def scan_directory(self, source_dir: str, strategy: str, output_dir: str) -> list:
+    def scan_directory(
+        self,
+        source_dir: str,
+        strategy: str,
+        output_dir: str,
+        progress_callback=None,
+        batch_size: int = 50,
+    ) -> list:
         self.files.clear()
         if not source_dir or not os.path.exists(source_dir):
             return []
 
         scan_recursively = strategy in ("zachowaj strukturę podfolderów", "spłaszcz podfoldery")
+        batch = []
 
         if scan_recursively:
             stack = [source_dir]
@@ -25,18 +33,12 @@ class FileManager:
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                             elif entry.is_file(follow_symlinks=False):
-                                filename = entry.name
-                                full_path = entry.path
-                                rel_path = os.path.relpath(full_path, source_dir)
-                                size_kb = round(entry.stat().st_size / 1024, 1)
-                                self.files.append(
-                                    {
-                                        "source_path": full_path,
-                                        "relative_path": rel_path,
-                                        "filename": filename,
-                                        "size_kb": size_kb,
-                                    }
-                                )
+                                file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
+                                self.files.append(file_entry)
+                                batch.append(file_entry)
+                                if len(batch) >= batch_size:
+                                    self._emit_progress(progress_callback, batch)
+                                    batch = []
                 except PermissionError:
                     continue
         else:
@@ -44,65 +46,65 @@ class FileManager:
                 with os.scandir(source_dir) as entries:
                     for entry in entries:
                         if entry.is_file(follow_symlinks=False):
-                            filename = entry.name
-                            size_kb = round(entry.stat().st_size / 1024, 1)
-
-                            self.files.append(
-                                {
-                                    "source_path": entry.path,
-                                    "relative_path": filename,
-                                    "filename": filename,
-                                    "size_kb": size_kb,
-                                }
-                            )
+                            file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
+                            self.files.append(file_entry)
+                            batch.append(file_entry)
+                            if len(batch) >= batch_size:
+                                self._emit_progress(progress_callback, batch)
+                                batch = []
             except PermissionError:
                 pass
-        self._update_status_metadata()
-        self._update_output_path(output_dir, strategy)
-        self._update_status_existing()
-        return
 
-    def _update_status_metadata(self):
-        for f in self.files:
-            # Initialize status using the official FileStatus Enum objects instead of raw strings
-            if "status" not in f:
-                ext = os.path.splitext(f["filename"])[1].lower()
-                if ext in SUPPORTED_EXTENSIONS:
-                    f["status"] = FileStatus.PENDING
-                else:
-                    f["status"] = FileStatus.UNCONVERTIBLE
+        if batch:
+            self._emit_progress(progress_callback, batch)
+        return self.files
 
-    def _update_output_path(self, output_dir: str, strategy: str):
-        for f in self.files:
-            # Determine destination path based on subfolder layout preferences
-            if strategy == "zachowaj strukturę podfolderów":
-                dest_path = os.path.join(output_dir, f["relative_path"])
-            elif strategy == "spłaszcz podfoldery":
-                # Replace both forward and backward slashes in relative path with underscores
-                flattened_filename = f["relative_path"].replace("/", "_").replace("\\", "_")
-                dest_path = os.path.join(output_dir, flattened_filename)
-            else:
-                # "nie skanuj podfolderów" drops files directly in the output root using their original filename
-                dest_path = os.path.join(output_dir, f["filename"])
+    def _build_file_entry(self, entry, source_dir: str, output_dir: str, strategy: str) -> dict:
+        filename = entry.name
+        full_path = entry.path
+        rel_path = os.path.relpath(full_path, source_dir)
+        size_kb = round(entry.stat().st_size / 1024, 1)
+        destination = self._build_destination_path(output_dir, strategy, rel_path, filename)
+        status = self._resolve_status(filename, destination)
 
-            base_path, ext = os.path.splitext(dest_path)
-            ext_lower = ext.lower()
+        return {
+            "source_path": full_path,
+            "relative_path": rel_path,
+            "filename": filename,
+            "size_kb": size_kb,
+            "status": status,
+            "destination": destination,
+        }
 
-            if ext_lower in SUPPORTED_EXTENSIONS:
-                dest_path = base_path + SUPPORTED_EXTENSIONS[ext_lower]
+    def _build_destination_path(self, output_dir: str, strategy: str, rel_path: str, filename: str) -> str:
+        if strategy == "zachowaj strukturę podfolderów":
+            dest_path = os.path.join(output_dir, rel_path)
+        elif strategy == "spłaszcz podfoldery":
+            flattened_filename = rel_path.replace("/", "_").replace("\\", "_")
+            dest_path = os.path.join(output_dir, flattened_filename)
+        else:
+            dest_path = os.path.join(output_dir, filename)
 
-            f["destination"] = dest_path
+        base_path, ext = os.path.splitext(dest_path)
+        ext_lower = ext.lower()
+        if ext_lower in SUPPORTED_EXTENSIONS:
+            dest_path = base_path + SUPPORTED_EXTENSIONS[ext_lower]
+        return dest_path
 
-    def _update_status_existing(self) -> None:
-        for f in self.files:
-            if "destination" not in f or f["status"] not in (FileStatus.PENDING, FileStatus.UNCONVERTIBLE):
-                continue
+    def _resolve_status(self, filename: str, destination: str) -> FileStatus:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in SUPPORTED_EXTENSIONS:
+            status = FileStatus.PENDING
+        else:
+            status = FileStatus.UNCONVERTIBLE
 
-            if os.path.isfile(f["destination"]):
-                if f["status"] == FileStatus.PENDING:
-                    f["status"] = FileStatus.EXISTING_PENDING
-                else:
-                    f["status"] = FileStatus.EXISTING_UNCONVERTIBLE
+        if os.path.isfile(destination):
+            return FileStatus.EXISTING_PENDING if status == FileStatus.PENDING else FileStatus.EXISTING_UNCONVERTIBLE
+        return status
+
+    def _emit_progress(self, progress_callback, batch: list) -> None:
+        if progress_callback:
+            progress_callback(batch)
 
     def get_ui_table_data(self, show_conv: bool = True, show_non_conv: bool = True, show_done: bool = True) -> list:
         filtered_view = []
@@ -127,6 +129,12 @@ class FileManager:
             if f["source_path"] == source_path:
                 f["status"] = new_status
                 break
+
+    def get_file_entry(self, source_path: str) -> dict | None:
+        for f in self.files:
+            if f["source_path"] == source_path:
+                return f
+        return None
 
     def get_statistics(self) -> dict:
         """Returns metadata about the scanned set for the status bar."""

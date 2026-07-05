@@ -23,6 +23,7 @@ class ConfigManager:
             "show_non_convertible": "True",
             "show_converted": "True",
             "remove_metadata": "True",
+            "worker_count": "4",
         }
 
         if not os.path.exists(self.filename):
