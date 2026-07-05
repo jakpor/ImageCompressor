@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+import os
 
 
 def compress_single_png(file_path: str, output_dir: str, magick_path: str, strip_metadata: bool):
@@ -39,8 +40,7 @@ def compress_single_png(file_path: str, output_dir: str, magick_path: str, strip
 
 def compress_png_images(source_dir, output_dir, strip_metadata: bool):
     # Ścieżka relatywna do folderu, w którym znajduje się ten skrypt .py
-    script_dir = Path(__file__).parent.resolve()
-    magick_path = script_dir / "imageMagick" / "magick.exe"
+    magick_path = Path(os.getcwd()) / "imageMagick" / "magick.exe"
 
     # Walidacja obecności pliku wykonywalnego
     if not magick_path.exists():
