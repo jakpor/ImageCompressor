@@ -1,12 +1,12 @@
 import os
-from file_status import FileStatus
+from definitions import FileStatus
+from definitions import SUPPORTED_EXTENSIONS
 
 
 class FileManager:
     def __init__(self):
-        # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "is_processed": ... }
+        # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ... }
         self.files = []
-        self.supported_extensions = (".jpg", ".jpeg", ".png")
 
     def scan_directory(self, source_dir: str, strategy: str, output_dir: str) -> list:
         self.files.clear()
@@ -67,7 +67,7 @@ class FileManager:
             # Initialize status using the official FileStatus Enum objects instead of raw strings
             if "status" not in f:
                 ext = os.path.splitext(f["filename"])[1].lower()
-                if ext in self.supported_extensions:
+                if ext in SUPPORTED_EXTENSIONS:
                     f["status"] = FileStatus.PENDING
                 else:
                     f["status"] = FileStatus.UNCONVERTIBLE
@@ -85,7 +85,12 @@ class FileManager:
                 # "nie skanuj podfolderów" drops files directly in the output root using their original filename
                 dest_path = os.path.join(output_dir, f["filename"])
 
-            # Directly store the calculated destination path inside the master dictionary item
+            base_path, ext = os.path.splitext(dest_path)
+            ext_lower = ext.lower()
+
+            if ext_lower in SUPPORTED_EXTENSIONS:
+                dest_path = base_path + SUPPORTED_EXTENSIONS[ext_lower]
+
             f["destination"] = dest_path
 
     def _update_status_existing(self) -> None:
@@ -114,30 +119,20 @@ class FileManager:
 
         return filtered_view
 
-    def get_queue_for_compressor(self) -> list:
-        """
-        Generates a clean execution list for the compression engine.
-        Returns a list of dicts containing accurate input paths and pre-calculated output destinations.
-        """
-        queue = []
+    def get_files_for_compressor(self) -> list:
+        return self.files
+
+    def update_file_status(self, source_path: str, new_status: FileStatus) -> None:
         for f in self.files:
-            if not f["status"] == FileStatus.PENDING:
-                continue
-
-            # Determine destination path based on subfolder layout preferences
-            if strategy == "zachowaj strukturę podfolderów":
-                dest_path = os.path.join(output_dir, f["relative_path"])
-            else:
-                # "spłaszcz podfoldery" or "nie skanuj podfolderów" both drop files directly in the output root
-                dest_path = os.path.join(output_dir, f["filename"])
-
-            queue.append({"source": f["source_path"], "destination": dest_path})
-        return queue
+            if f["source_path"] == source_path:
+                f["status"] = new_status
+                break
 
     def get_statistics(self) -> dict:
         """Returns metadata about the scanned set for the status bar."""
         total_count = len(self.files)
         pending_count = sum(1 for f in self.files if f["status"] == FileStatus.PENDING)
+        converted_count = sum(1 for f in self.files if f["status"] == FileStatus.DONE)
         unconvertible_count = sum(1 for f in self.files if f["status"] == FileStatus.UNCONVERTIBLE)
         pending_size = sum(f["size_kb"] for f in self.files if f["status"] == FileStatus.PENDING)
         unconvertible_size = sum(f["size_kb"] for f in self.files if f["status"] == FileStatus.UNCONVERTIBLE)
@@ -145,6 +140,7 @@ class FileManager:
         return {
             "total_count": total_count,
             "pending_count": pending_count,
+            "converted_count": converted_count,
             "unconvertible_count": unconvertible_count,
             "pending_size_mb": round(pending_size / 1024, 2),
             "unconvertible_size_mb": round(unconvertible_size / 1024, 2),
@@ -156,5 +152,6 @@ class FileManager:
         return (
             f"Wszystkich plików: {stats['total_count']} | "
             f"Do przetworzenia: {stats['pending_count']} ({stats['pending_size_mb']} MB) | "
-            f"Niekonwertowalne: {stats['unconvertible_count']} ({stats['unconvertible_size_mb']} MB)"
+            f"Niekonwertowalne: {stats['unconvertible_count']} ({stats['unconvertible_size_mb']} MB) | "
+            f"Przekonwertowane: {stats['converted_count']}"
         )

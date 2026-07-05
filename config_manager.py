@@ -22,6 +22,7 @@ class ConfigManager:
             "show_convertible": "True",
             "show_non_convertible": "True",
             "show_converted": "True",
+            "remove_metadata": "True",
         }
 
         if not os.path.exists(self.filename):

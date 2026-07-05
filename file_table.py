@@ -1,5 +1,5 @@
 import customtkinter
-from file_status import FileStatus
+from definitions import FileStatus
 
 
 class FileProcessingTable(customtkinter.CTkScrollableFrame):

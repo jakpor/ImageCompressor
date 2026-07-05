@@ -1,11 +1,15 @@
 import signal
+import os
 import tkinter as tk
 from tkinter import StringVar, IntVar
 import customtkinter
 import threading
+from pathlib import Path
 from file_manager import FileManager
 from config_manager import ConfigManager
 from file_table import FileProcessingTable
+from compressor import create_configured_compressor
+from definitions import FileStatus
 
 customtkinter.set_appearance_mode("System")
 customtkinter.set_default_color_theme("green")
@@ -83,6 +87,9 @@ class App(customtkinter.CTk):
             self.iconbitmap("press.ico")
         except Exception:
             pass
+
+        # Initialize compressor
+        self.compressor = create_configured_compressor()
 
         # Main Layout Configuration
         self.grid_columnconfigure(0, weight=1)
@@ -213,7 +220,7 @@ class App(customtkinter.CTk):
 
         # ================= Options Checkboxes Container =================
         self.frame_checkboxes = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
-        self.frame_checkboxes.grid(row=5, column=1, columnspan=2, pady=(4, 8), padx=10, sticky="w")
+        self.frame_checkboxes.grid(row=5, column=1, columnspan=2, pady=(4, 8), padx=10)
 
         # 6. Checkbox - copy all files, including uncompressible ones
         initial_cb_value = stored_settings.get("copy_uncompressible", "False") == "True"
@@ -225,7 +232,7 @@ class App(customtkinter.CTk):
             command=self.save_config,
             font=("Roboto", 12),
         )
-        self.cb_copy_uncompressible.pack(side="left", padx=(0, 25))
+        self.cb_copy_uncompressible.pack(side="left", padx=15, anchor="center")
         CTkTooltip(
             self.cb_copy_uncompressible,
             "Zaznacz by skopiować wszystkie pliki, nawet te, których nie można skompresować",
@@ -241,8 +248,23 @@ class App(customtkinter.CTk):
             command=self.save_config,
             font=("Roboto", 12),
         )
-        self.cb_overwrite_files.pack(side="left", padx=0)
+        self.cb_overwrite_files.pack(side="left", padx=15, anchor="center")
         CTkTooltip(self.cb_overwrite_files, "Zaznacz by nadpisać już skompresowane pliki w folderze wyjściowym")
+
+        # 7. Checkbox - Usuń metadane
+        initial_remove_metadata_value = stored_settings.get("remove_metadata", "False") == "True"
+        self.remove_metadata_var = tk.BooleanVar(value=initial_remove_metadata_value)
+        self.cb_remove_metadata = customtkinter.CTkCheckBox(
+            self.frame_checkboxes,
+            text="Usuń metadane",
+            variable=self.remove_metadata_var,
+            command=self.save_config,
+            font=("Roboto", 12),
+        )
+        self.cb_remove_metadata.pack(side="left", padx=15, anchor="center")
+        CTkTooltip(
+            self.cb_remove_metadata, "Zaznacz by usunąć metadane plików (daty utworzenia, informacje o aparacie, etc.)"
+        )
 
         # ================= CONTROLS FRAME =================
         self.frame_controls = customtkinter.CTkFrame(master=self, fg_color="transparent")
@@ -408,6 +430,7 @@ class App(customtkinter.CTk):
                 "show_convertible": str(self.show_convertible.get()),
                 "show_non_convertible": str(self.show_non_convertible.get()),
                 "show_converted": str(self.show_converted.get()),
+                "remove_metadata": str(self.remove_metadata.get()),
             }
             self.config_manager.save_settings(current_settings)
         except (tk.TclError, AttributeError):
@@ -457,7 +480,47 @@ class App(customtkinter.CTk):
         ):
             self.load_files_btn()  # Refresh file list if directories or strategy changed
 
+        quality = self.quality.get()
+        strip_metadata = self.remove_metadata_var.get()
+        overwrite_files = self.overwrite_files_var.get()
+        copy_uncompressible = self.copy_uncompressible_var.get()
+
+        script_dir = Path(os.getcwd())
+        magick_path = script_dir / "imageMagick" / "magick.exe"
+        cjpegli_path = script_dir / "jpegli" / "cjpegli.exe"
+        config = {
+            "magick_path": magick_path,
+            "cjpegli_path": cjpegli_path,
+            "quality": quality,
+            "strip_metadata": strip_metadata,
+            "copy_uncompressible": copy_uncompressible,
+            "override_files": overwrite_files,
+        }
+        files_to_process = self.file_manager.get_files_for_compressor()
+
+        # Define the background worker process
+        def worker():
+            self.compressor.compress_files_list(
+                files_list=files_to_process, config=config, progress_callback=self._on_file_processed_callback
+            )
+            self.status_var.set("Kompresja zakończona pomyślnie!")
+
+        # Start thread execution layout
+        threading.Thread(target=worker, daemon=True).start()
+
         self.status_var.set("Trwa kompresowanie...")
+
+    def _on_file_processed_callback(self, filename: str, status: FileStatus):
+        self.file_manager.update_file_status(filename, status)
+        # self.table.populate_data(
+        #     self.file_manager.get_ui_table_data(
+        #         show_conv=self.show_convertible.get(),
+        #         show_non_conv=self.show_non_convertible.get(),
+        #         show_done=self.show_converted.get(),
+        #     )
+        # )
+        self.status_var.set(self.file_manager.get_statistics_summary())
+        self.update_idletasks()
 
     def on_closing(self):
         self.save_config()  # Final save execution guard
