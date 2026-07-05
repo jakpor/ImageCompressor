@@ -32,6 +32,13 @@ The app UI language is Polish
 python main.py
 ```
 
+## Building executable
+```bash
+pyinstaller main.spec
+# pyinstaller --noconfirm --onefile --windowed main.py
+```
+*Requires `python -m pip install pyinstaller`
+
 ## Usage
 1. Choose an input folder and an output folder.
 2. Set the desired compression options.

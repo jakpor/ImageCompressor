@@ -1,4 +1,5 @@
 import signal
+import sys
 import os
 import queue
 import tkinter as tk
@@ -65,6 +66,17 @@ class CTkTooltip:
             self.tip_window = None
 
 
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
 class App(customtkinter.CTk):
     WIDTH = 900
     HEIGHT = 700
@@ -82,14 +94,15 @@ class App(customtkinter.CTk):
         self.config_manager = ConfigManager()
         stored_settings = self.config_manager.load_settings()
 
-        self.title("Image compressor")
+        self.title("Zmniejszacz obrazów")
         self.geometry(f"{App.WIDTH}x{App.HEIGHT}")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         signal.signal(signal.SIGINT, lambda sig, frame: self.on_closing())
 
         # Try loading icon safely
         try:
-            self.iconbitmap("press.ico")
+            icon_path = get_resource_path("press.ico")
+            self.iconbitmap(icon_path)
         except Exception:
             print("Error loading icon.")
             pass
@@ -158,6 +171,10 @@ class App(customtkinter.CTk):
             width=220,
             command=lambda choice: self.save_config(),
         )
+        CTkTooltip(
+            self.combo_strat,
+            "Wybierz jak mają być traktowane podfoldery w folderze wejściowym. 'Nie skanuj podfolderów' oznacza, że tylko pliki w głównym folderze wejściowym zostaną przetworzone.",
+        )
         self.combo_strat.pack(side="left", padx=(0, 20))
 
         # --- Quality Settings inside the same horizontal pack layout ---
@@ -165,6 +182,10 @@ class App(customtkinter.CTk):
             self.strat_quality_container, text="Jakość [1-100]:", font=("Roboto", 14)
         )
         self.label_quality.pack(side="left", padx=(0, 5))
+        CTkTooltip(
+            self.label_quality,
+            "Jakość kompresji. Wyższa wartość oznacza lepszą jakość obrazu, ale większy rozmiar pliku. Zalecana wartość to 85-95.",
+        )
 
         # Hooked: Init from config + strict range trace that automatically invokes save_config
         self.quality = IntVar(value=int(stored_settings["quality"]))
@@ -194,6 +215,10 @@ class App(customtkinter.CTk):
             variable=self.res_option_var,
             command=self.on_resolution_changed,
             width=180,
+        )
+        CTkTooltip(
+            self.combo_res,
+            "Maksymalna rozdzielczość wyjściowa. Obrazy większe niż wybrana rozdzielczość zostaną zmniejszone proporcjonalnie.",
         )
         self.combo_res.pack(side="left")
 
@@ -235,6 +260,10 @@ class App(customtkinter.CTk):
             self.res_container, width=45, textvariable=self.worker_count_var
         )
         self.worker_count_entry.pack(side="left", padx=2)
+        CTkTooltip(
+            self.worker_count_entry,
+            "Ile obrazów może być przetwarzanych jednocześnie. Zbyt duża liczba wątków może spowodować spowolnienie systemu.",
+        )
 
         # ================= Options Checkboxes Container =================
         self.frame_checkboxes = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
@@ -321,8 +350,10 @@ class App(customtkinter.CTk):
         self.frame_filter.grid_columnconfigure(0, weight=0, minsize=180)
         self.frame_filter.grid_columnconfigure(1, weight=1)
 
-        self.label_filter = customtkinter.CTkLabel(
-            self.frame_filter, text="Wyświetl pliki (100 pierwszych):", font=("Roboto", 14)
+        self.label_filter = customtkinter.CTkLabel(self.frame_filter, text="Wyświetl pliki:", font=("Roboto", 14))
+        CTkTooltip(
+            self.label_filter,
+            "Filtruj wyświetlane pliki w tabeli. Możesz wybrać, czy chcesz widzieć tylko pliki konwertowalne, niekonwertowalne lub już skonwertowane.\nTabela zawiera tylko 100 pierwszych plików, więc jeśli nie widzisz wszystkich, użyj filtrów by je znaleźć.",
         )
         self.label_filter.grid(row=0, column=0, pady=10, padx=15, sticky="w")
 
