@@ -5,8 +5,36 @@ from definitions import SUPPORTED_EXTENSIONS
 
 class FileManager:
     def __init__(self):
-        # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ... }
+        # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ..., "output_size_kb": ... }
         self.files = []
+
+    @staticmethod
+    def _normalize_path(path) -> str | None:
+        if path is None:
+            return None
+        try:
+            return os.path.normcase(os.path.abspath(str(path)))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _get_output_size_kb(destination: str | None) -> float | None:
+        if not destination or not os.path.isfile(destination):
+            return None
+        return round(os.path.getsize(destination) / 1024, 1)
+
+    def _get_matching_entry(self, source_path):
+        target_path = self._normalize_path(source_path)
+        for f in self.files:
+            if self._normalize_path(f.get("source_path")) == target_path:
+                return f
+
+        fallback_name = os.path.basename(str(source_path)) if source_path is not None else None
+        if fallback_name:
+            for f in self.files:
+                if f.get("filename") == fallback_name or f.get("relative_path") == str(source_path):
+                    return f
+        return None
 
     def scan_directory(
         self,
@@ -36,9 +64,6 @@ class FileManager:
                                 file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
                                 self.files.append(file_entry)
                                 batch.append(file_entry)
-                                if len(batch) >= batch_size:
-                                    self._emit_progress(progress_callback, batch)
-                                    batch = []
                 except PermissionError:
                     continue
         else:
@@ -49,9 +74,6 @@ class FileManager:
                             file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
                             self.files.append(file_entry)
                             batch.append(file_entry)
-                            if len(batch) >= batch_size:
-                                self._emit_progress(progress_callback, batch)
-                                batch = []
             except PermissionError:
                 pass
 
@@ -74,6 +96,7 @@ class FileManager:
             "size_kb": size_kb,
             "status": status,
             "destination": destination,
+            "output_size_kb": self._get_output_size_kb(destination),
         }
 
     def _build_destination_path(self, output_dir: str, strategy: str, rel_path: str, filename: str) -> str:
@@ -107,34 +130,47 @@ class FileManager:
             progress_callback(batch)
 
     def get_ui_table_data(self, show_conv: bool = True, show_non_conv: bool = True, show_done: bool = True) -> list:
+        MAX_ROWS = 100
         filtered_view = []
+        current_row = 0
         for f in self.files:
             current_status = f["status"]
             if current_status == FileStatus.DONE and not show_done:
                 continue
-            if current_status == FileStatus.PENDING and not show_conv:
+            if (
+                current_status == FileStatus.PENDING or current_status == FileStatus.EXISTING_PENDING
+            ) and not show_conv:
                 continue
-            if current_status == FileStatus.UNCONVERTIBLE and not show_non_conv:
+            if (
+                current_status == FileStatus.UNCONVERTIBLE or current_status == FileStatus.EXISTING_UNCONVERTIBLE
+            ) and not show_non_conv:
                 continue
 
-            filtered_view.append((f["status"], f["relative_path"], f["size_kb"]))
+            filtered_view.append((f["status"], f["relative_path"], f["size_kb"], f.get("output_size_kb")))
+            current_row += 1
+            if current_row >= MAX_ROWS:
+                break
 
         return filtered_view
 
     def get_files_for_compressor(self) -> list:
         return self.files
 
-    def update_file_status(self, source_path: str, new_status: FileStatus) -> None:
-        for f in self.files:
-            if f["source_path"] == source_path:
-                f["status"] = new_status
-                break
+    def update_file_status(self, source_path, new_status: FileStatus) -> None:
+        entry = self._get_matching_entry(source_path)
+        if entry is None:
+            return
+        entry["status"] = new_status
+        self.refresh_output_size_for_source(source_path)
 
-    def get_file_entry(self, source_path: str) -> dict | None:
-        for f in self.files:
-            if f["source_path"] == source_path:
-                return f
-        return None
+    def refresh_output_size_for_source(self, source_path) -> None:
+        entry = self._get_matching_entry(source_path)
+        if entry is None:
+            return
+        entry["output_size_kb"] = self._get_output_size_kb(entry.get("destination"))
+
+    def get_file_entry(self, source_path) -> dict | None:
+        return self._get_matching_entry(source_path)
 
     def get_statistics(self) -> dict:
         """Returns metadata about the scanned set for the status bar."""

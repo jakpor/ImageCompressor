@@ -15,6 +15,8 @@ from definitions import FileStatus
 customtkinter.set_appearance_mode("System")
 customtkinter.set_default_color_theme("green")
 
+_UI_LOG_LOCK = threading.Lock()
+
 
 # Tooltip class for providing hover-over information
 class CTkTooltip:
@@ -70,6 +72,8 @@ class App(customtkinter.CTk):
     def __init__(self):
         super().__init__()
         self.threads = []
+        self._shutdown_event = threading.Event()
+        self._compression_stop_event = threading.Event()
 
         self.file_manager = FileManager()
         self.load_file_config = {}
@@ -304,7 +308,7 @@ class App(customtkinter.CTk):
             font=("Roboto", 15, "bold"),
             fg_color="green",
             hover_color="darkgreen",
-            command=self.compress_images_btn,
+            command=self.toggle_compression,
         )
         self.btn_start_comp.grid(row=0, column=1, pady=5, padx=(10, 0), sticky="ew")
 
@@ -317,7 +321,9 @@ class App(customtkinter.CTk):
         self.frame_filter.grid_columnconfigure(0, weight=0, minsize=180)
         self.frame_filter.grid_columnconfigure(1, weight=1)
 
-        self.label_filter = customtkinter.CTkLabel(self.frame_filter, text="Wyświetl pliki:", font=("Roboto", 14))
+        self.label_filter = customtkinter.CTkLabel(
+            self.frame_filter, text="Wyświetl pliki (100 pierwszych):", font=("Roboto", 14)
+        )
         self.label_filter.grid(row=0, column=0, pady=10, padx=15, sticky="w")
 
         # Container framework to map checkboxes inline horizontally
@@ -379,13 +385,15 @@ class App(customtkinter.CTk):
         self.compress_in_progress = False
         self.ui_queue = queue.Queue()
         self._ui_queue_active = False
+        self._pending_refresh = False
         self._processed_file_count = 0
         self._total_files_to_process = 0
+        self._compression_pending = False
 
         # Status Label acting as Status Bar
         self.status_var = StringVar(value="Gotowy")
         self.status_bar = customtkinter.CTkLabel(
-            self.frame_bottom, textvariable=self.status_var, font=("Roboto", 11), text_color="gray"
+            self.frame_bottom, textvariable=self.status_var, font=("Roboto", 12), text_color="gray"
         )
         self.status_bar.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 5))
 
@@ -422,18 +430,7 @@ class App(customtkinter.CTk):
             self.custom_res_frame.pack_forget()
 
     def on_filter_changed(self):
-        # Read current checkbox states (True/False)
-        show_conv = self.show_convertible.get()
-        show_non_conv = self.show_non_convertible.get()
-        show_converted = self.show_converted.get()
-
-        filtered_ui_data = self.file_manager.get_ui_table_data(
-            show_conv=show_conv, show_non_conv=show_non_conv, show_done=show_converted
-        )
-
-        self.table.populate_data(filtered_ui_data)
-
-        self.status_var.set(self.file_manager.get_statistics_summary())
+        self._refresh_table_with_current_filters()
 
     def save_config(self):
         try:
@@ -458,7 +455,7 @@ class App(customtkinter.CTk):
             print("Error saving config: Invalid value in one of the fields. {}".format(error))
             pass
 
-    def load_files_btn(self):
+    def load_files_btn(self, start_compression_after_scan: bool = False):
         src = self.source_dir.get()
         dest = self.output_dir.get()
         strat = self.strategy_var.get()
@@ -473,8 +470,9 @@ class App(customtkinter.CTk):
             return
 
         self.scan_in_progress = True
-        self.progressbar.set(0)
-        self.status_var.set("Skanowanie katalogu...")
+        self._compression_pending = start_compression_after_scan
+        self._set_progress_value(0)
+        self._set_status_message("Skanowanie katalogu...")
         self.table.clear_table()
 
         def progress_callback(batch):
@@ -482,31 +480,76 @@ class App(customtkinter.CTk):
 
         def async_scan():
             try:
-                self.file_manager.scan_directory(src, strat, dest, progress_callback=progress_callback, batch_size=25)
+                if self._shutdown_event.is_set():
+                    return
+                self.file_manager.scan_directory(src, strat, dest, progress_callback=progress_callback, batch_size=50)
             finally:
-                self._queue_ui_update("scan_complete", None)
+                if not self._shutdown_event.is_set():
+                    self._queue_ui_update("scan_complete", None)
 
-        threading.Thread(target=async_scan, daemon=True).start()
+        thread = threading.Thread(target=async_scan, name="scan-worker", daemon=True)
+        self.threads.append(thread)
+        thread.start()
 
     def _refresh_table_from_batch(self, batch):
         if not batch:
             return
-        self.table.update_rows_from_entries(batch)
-        self.status_var.set(self.file_manager.get_statistics_summary())
+        self._refresh_table_with_current_filters()
+
+    def _refresh_table_with_current_filters(self):
+        filtered_ui_data = self.file_manager.get_ui_table_data(
+            show_conv=self.show_convertible.get(),
+            show_non_conv=self.show_non_convertible.get(),
+            show_done=self.show_converted.get(),
+        )
+        self.table.populate_data(filtered_ui_data)
+        self.table.update_idletasks()
 
     def _finalize_scan(self):
         self.scan_in_progress = False
-        self.progressbar.set(1)
-        self.status_var.set(self.file_manager.get_statistics_summary())
+        self._set_progress_value(1)
+        self._set_status_message("Skanowanie katalogu zakończone")
+        self._refresh_table_with_current_filters()
+        if self._compression_pending:
+            self._compression_pending = False
+            self._start_compression_job()
+
+    def _set_compression_button_state(self, running: bool):
+        self.btn_start_comp.configure(text="Zatrzymaj kompresję" if running else "Kompresuj")
+
+    def toggle_compression(self):
+        if self.compress_in_progress:
+            self.stop_compression()
+        else:
+            self.compress_images_btn()
+
+    def stop_compression(self):
+        if not self.compress_in_progress:
+            return
+        self._compression_stop_event.set()
+        self._set_status_message("Zatrzymywanie kompresji...")
 
     def compress_images_btn(self):
+        if self.compress_in_progress:
+            return
+
+        if self.scan_in_progress:
+            self._compression_pending = True
+            self._set_status_message("Skanowanie w toku. Kompresja rozpocznie się po zakończeniu skanowania.")
+            return
+
         if (
             self.load_file_config.get("source_dir") != self.source_dir.get()
             or self.load_file_config.get("output_dir") != self.output_dir.get()
             or self.load_file_config.get("strategy") != self.strategy_var.get()
         ):
-            self.load_files_btn()  # Refresh file list if directories or strategy changed
+            self.load_files_btn(start_compression_after_scan=True)
+            self._set_status_message("Wczytywanie plików... Kompresja rozpocznie się po zakończeniu skanowania.")
+            return
 
+        self._start_compression_job()
+
+    def _start_compression_job(self):
         quality = self.quality.get()
         strip_metadata = self.remove_metadata_var.get()
         overwrite_files = self.overwrite_files_var.get()
@@ -515,6 +558,7 @@ class App(customtkinter.CTk):
         script_dir = Path(os.getcwd())
         magick_path = script_dir / "imageMagick" / "magick.exe"
         cjpegli_path = script_dir / "jpegli" / "cjpegli.exe"
+        resolution = self._get_max_resolution_config()
         config = {
             "magick_path": magick_path,
             "cjpegli_path": cjpegli_path,
@@ -523,21 +567,103 @@ class App(customtkinter.CTk):
             "copy_uncompressible": copy_uncompressible,
             "override_files": overwrite_files,
             "worker_count": int(self.worker_count_var.get()),
+            "max_resolution": resolution,
         }
         files_to_process = self.file_manager.get_files_for_compressor()
+        if not files_to_process:
+            self._set_status_message("Brak plików do kompresji. Najpierw wczytaj katalog.")
+            return
+
         self._processed_file_count = 0
         self._total_files_to_process = len(files_to_process)
-        self.progressbar.set(0)
+        self._compression_stop_event = threading.Event()
+        self._set_progress_value(0)
         self.compress_in_progress = True
+        self._set_compression_button_state(True)
 
         def worker():
+            if self._shutdown_event.is_set():
+                return
             self.compressor.compress_files_list(
-                files_list=files_to_process, config=config, progress_callback=self._on_file_processed_callback
+                files_list=files_to_process,
+                config=config,
+                progress_callback=self._on_file_processed_callback,
+                stop_event=self._compression_stop_event,
             )
-            self._queue_ui_update("compression_complete", None)
+            if self._compression_stop_event.is_set():
+                self._queue_ui_update("compression_stopped", None)
+            else:
+                self._queue_ui_update("compression_complete", None)
 
-        threading.Thread(target=worker, daemon=True).start()
-        self.status_var.set("Trwa kompresowanie...")
+        thread = threading.Thread(target=worker, name="compress-worker", daemon=True)
+        self.threads.append(thread)
+        thread.start()
+        self._set_status_message("Trwa kompresowanie...")
+
+    def _get_max_resolution_config(self):
+        preset = self.res_option_var.get()
+        if preset == "4K:3840x2560":
+            return "3840x2560"
+        if preset == "2K:2160x1440":
+            return "2160x1440"
+        if preset == "1080x720":
+            return "1080x720"
+        return f"{self.custom_w_var.get()}x{self.custom_h_var.get()}"
+
+    def _format_size(self, size_kb):
+        if size_kb is None:
+            return "0 KB"
+        if size_kb >= 1024:
+            return f"{size_kb / 1024:.1f} MB"
+        return f"{size_kb:.1f} KB"
+
+    def _safe_log(self, message: str) -> None:
+        with _UI_LOG_LOCK:
+            print(message, flush=True)
+
+    def _set_status_message(self, message: str) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self.status_var.set(message)
+        else:
+            self._queue_ui_update("status", message)
+
+    def _set_progress_value(self, value: float) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self.progressbar.set(value)
+        else:
+            self._queue_ui_update("progress", value)
+
+    def _build_completion_summary(self):
+        total = len(self.file_manager.files)
+        processed = 0
+        skipped = 0
+        saved_kb = 0.0
+        for entry in self.file_manager.files:
+            status = entry.get("status")
+            if status in {
+                FileStatus.DONE,
+                FileStatus.UNCONVERTIBLE,
+                FileStatus.ERROR_COMPRESSION,
+                FileStatus.ERROR_COPY,
+            }:
+                processed += 1
+            elif status in {FileStatus.EXISTING_PENDING, FileStatus.EXISTING_UNCONVERTIBLE}:
+                skipped += 1
+            source_size = entry.get("size_kb") or 0
+            output_size = entry.get("output_size_kb")
+            if output_size is None:
+                continue
+            if output_size < source_size:
+                saved_kb += source_size - output_size
+
+        saved_text = self._format_size(saved_kb)
+        if skipped:
+            return (
+                f"Kompresja zakończona. Przetworzono {processed}/{total} plików. "
+                f"Pominięto {skipped} plików z powodu istniejących wyników. "
+                f"Zaoszczędzono około {saved_text}."
+            )
+        return f"Kompresja zakończona. Przetworzono {processed}/{total} plików. Zaoszczędzono około {saved_text}."
 
     def _on_file_processed_callback(self, source_path, status: FileStatus):
         self._queue_ui_update("file_status", (str(source_path), status))
@@ -549,37 +675,71 @@ class App(customtkinter.CTk):
             self.after(0, self._process_ui_queue)
 
     def _process_ui_queue(self):
+        if self._pending_refresh:
+            return
+
+        self._pending_refresh = True
+        self.after(50, self._drain_ui_queue)
+
+    def _drain_ui_queue(self):
+        self._pending_refresh = False
+        batch_events = []
         while True:
             try:
                 event_type, payload = self.ui_queue.get_nowait()
             except queue.Empty:
                 break
+            batch_events.append((event_type, payload))
 
+        for event_type, payload in batch_events:
             if event_type == "scan_batch":
                 self._refresh_table_from_batch(payload)
+                self._safe_log("Updated table with batch of scanned files")
             elif event_type == "scan_complete":
                 self._finalize_scan()
+                self._safe_log("Input directory scan complete")
+            elif event_type == "status":
+                self.status_var.set(payload)
+            elif event_type == "progress":
+                self.progressbar.set(payload)
             elif event_type == "file_status":
                 source_path, status = payload
                 self.file_manager.update_file_status(source_path, status)
-                row_data = self.file_manager.get_file_entry(source_path)
-                if row_data is not None:
-                    self.table.update_rows_from_entries([row_data])
+                self.file_manager.refresh_output_size_for_source(source_path)
                 self._processed_file_count += 1
                 if self._total_files_to_process:
-                    self.progressbar.set(self._processed_file_count / self._total_files_to_process)
-                self.status_var.set(self.file_manager.get_statistics_summary())
+                    self._set_progress_value(self._processed_file_count / self._total_files_to_process)
+                    self._set_status_message(self.file_manager.get_statistics_summary())
+                    self._refresh_table_with_current_filters()
             elif event_type == "compression_complete":
                 self.compress_in_progress = False
-                self.progressbar.set(1)
-                self.status_var.set("Kompresja zakończona pomyślnie!")
+                self._set_compression_button_state(False)
+                self._set_progress_value(1)
+                self._set_status_message(self._build_completion_summary())
+                self._safe_log("Compression complete. Updated table and status summary.")
+            elif event_type == "compression_stopped":
+                self.compress_in_progress = False
+                self._set_compression_button_state(False)
+                self._set_progress_value(self.progressbar.get())
+                self._set_status_message("Kompresja zatrzymana.")
+                self._safe_log("Compression stopped by user. Updated table and status summary.")
 
         if self.scan_in_progress or self.compress_in_progress:
-            self.after(25, self._process_ui_queue)
+            if not self.ui_queue.empty():
+                self._process_ui_queue()
+            else:
+                self.after(50, self._process_ui_queue)
         else:
             self._ui_queue_active = False
+            self._refresh_table_with_current_filters()
+            self._set_status_message(self.file_manager.get_statistics_summary())
 
     def on_closing(self):
+        self._shutdown_event.set()
+        self._compression_stop_event.set()
+        for thread in list(self.threads):
+            if thread.is_alive():
+                thread.join(timeout=0.2)
         self.save_config()
         self.destroy()
 

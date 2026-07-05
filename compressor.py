@@ -1,10 +1,18 @@
 import os
 import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 from pathlib import Path
 from definitions import FileStatus, SUPPORTED_EXTENSIONS, STRATEGY_MAPPING
+
+_LOG_LOCK = threading.Lock()
+
+
+def _log(message: str) -> None:
+    with _LOG_LOCK:
+        print(message, flush=True)
 
 
 # ==========================================
@@ -25,18 +33,23 @@ class CompressionStrategy(ABC):
 class JpegliCompressionStrategy(CompressionStrategy):
     """Compresses images to JPEG format using ImageMagick + Jpegli via pipes."""
 
+    def _build_resize_arg(self, config: dict) -> str:
+        max_resolution = config.get("max_resolution") or "3840x2160"
+        return f"{max_resolution}^>"
+
     def compress(self, source_path: Path, output_path: Path, config: dict) -> None:
         magick_path = config.get("magick_path")
         cjpegli_path = config.get("cjpegli_path")
         quality = config.get("quality", 90)
         strip_metadata = config.get("strip_metadata", False)
+        max_resolution = self._build_resize_arg(config)
 
         # 1. Configure ImageMagick (processing -> stdout in PPM format)
         magick_cmd = [
             str(magick_path),
             str(source_path),
             "-resize",
-            "3840x2160^>",
+            max_resolution,
             "-filter",
             "Triangle",
             "-define",
@@ -69,15 +82,20 @@ class JpegliCompressionStrategy(CompressionStrategy):
 class PngCompressionStrategy(CompressionStrategy):
     """Lossless compression for PNG files using ImageMagick only."""
 
+    def _build_resize_arg(self, config: dict) -> str:
+        max_resolution = config.get("max_resolution") or "3840x2160"
+        return f"{max_resolution}^>"
+
     def compress(self, source_path: Path, output_path: Path, config: dict) -> None:
         magick_path = config.get("magick_path")
         strip_metadata = config.get("strip_metadata", False)
+        max_resolution = self._build_resize_arg(config)
 
         magick_cmd = [
             str(magick_path),
             str(source_path),
             "-resize",
-            "3840x2160^>",
+            max_resolution,
             "-filter",
             "Triangle",
             "-define",
@@ -117,16 +135,21 @@ class UniversalStripMetadataStrategy(CompressionStrategy):
 class GifCompressionStrategy(CompressionStrategy):
     """Compresses animated GIFs by optimizing animation layers and reducing file size."""
 
+    def _build_resize_arg(self, config: dict) -> str:
+        max_resolution = config.get("max_resolution") or "3840x2160"
+        return f"{max_resolution}^>"
+
     def compress(self, source_path: Path, output_path: Path, config: dict) -> None:
         magick_path = config.get("magick_path")
         strip_metadata = config.get("strip_metadata", False)
+        max_resolution = self._build_resize_arg(config)
 
         magick_cmd = [
             str(magick_path),
             str(source_path),
             "-coalesce",
             "-resize",
-            "3840x2160^>",
+            max_resolution,
             "-filter",
             "Triangle",
             "-define",
@@ -217,13 +240,28 @@ class ImageCompressor:
         # Forward the temporary list directly into the execution engine
         self.compress_files_list(generated_files_list, config)
 
-    def compress_files_list(self, files_list: list, config: dict, progress_callback=None) -> None:
+    def _should_fallback_to_copy(self, source_path: Path, output_path: Path, config: dict) -> bool:
+        if config.get("strip_metadata", False):
+            return False
+        if not output_path.exists():
+            return False
+        try:
+            source_size = source_path.stat().st_size
+            output_size = output_path.stat().st_size
+            return output_size >= source_size
+        except OSError:
+            return False
+
+    def compress_files_list(self, files_list: list, config: dict, progress_callback=None, stop_event=None) -> None:
         """Processes a master list layout row items using registered strategy configurations."""
         copy_uncompressible = config.get("copy_uncompressible", False)
         override_files = config.get("override_files", False)
         worker_count = max(1, int(config.get("worker_count", 4)))
 
         def process_file(file_info: dict):
+            if stop_event and stop_event.is_set():
+                return
+
             current_status = file_info.get("status")
 
             if current_status == FileStatus.DONE:
@@ -233,9 +271,7 @@ class ImageCompressor:
                 FileStatus.EXISTING_PENDING,
                 FileStatus.EXISTING_UNCONVERTIBLE,
             }:
-                print(f"Skipping existing file (overwrite disabled): {file_info['filename']}")
-                if progress_callback:
-                    progress_callback(Path(file_info["source_path"]), current_status)
+                _log(f"Skipping existing file (overwrite disabled): {file_info['filename']}")
                 return
 
             source_path = Path(file_info["source_path"])
@@ -243,34 +279,50 @@ class ImageCompressor:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             strategy = self._get_strategy_for_file(source_path)
 
+            if stop_event and stop_event.is_set():
+                return
+
             if strategy:
-                print(f"Executing {strategy.__class__.__name__}: {source_path.name} -> {output_path.name}")
+                _log(f"Executing {strategy.__class__.__name__}: {source_path.name} -> {output_path.name}")
                 try:
                     strategy.compress(source_path, output_path, config)
+                    if stop_event and stop_event.is_set():
+                        return
+                    if self._should_fallback_to_copy(source_path, output_path, config):
+                        _log(f"Output larger than source for {source_path.name}; copying original instead")
+                        shutil.copy2(source_path, output_path)
                     if progress_callback:
                         progress_callback(source_path, FileStatus.DONE)
+                    _log(f"Completed: {source_path.name} -> {output_path.name}")
                 except Exception as e:
-                    print(f"Error compressing file {source_path.name}: {e}")
+                    _log(f"Error compressing file {source_path.name}: {e}")
                     if progress_callback:
                         progress_callback(source_path, FileStatus.ERROR_COMPRESSION)
             else:
                 if copy_uncompressible:
-                    print(f"Copying uncompressible file: {source_path.name}")
+                    _log(f"Copying uncompressible file: {source_path.name}")
                     try:
+                        if stop_event and stop_event.is_set():
+                            return
                         shutil.copy2(source_path, output_path)
+                        if stop_event and stop_event.is_set():
+                            return
                         if progress_callback:
                             progress_callback(source_path, FileStatus.DONE)
                     except Exception as e:
-                        print(f"Error copying file {source_path.name}: {e}")
+                        _log(f"Error copying file {source_path.name}: {e}")
                         if progress_callback:
                             progress_callback(source_path, FileStatus.ERROR_COPY)
                 else:
+                    _log(f"Skipping uncompressible file (copy disabled): {source_path.name}")
                     if progress_callback:
                         progress_callback(source_path, FileStatus.UNCONVERTIBLE)
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [executor.submit(process_file, file_info) for file_info in files_list]
             for future in futures:
+                if stop_event and stop_event.is_set():
+                    break
                 future.result()
 
 
