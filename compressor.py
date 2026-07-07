@@ -1,8 +1,10 @@
 import os
+import sys
 import shutil
+import tempfile
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from pathlib import Path
 from definitions import FileStatus, SUPPORTED_EXTENSIONS, STRATEGY_MAPPING
@@ -13,6 +15,13 @@ _LOG_LOCK = threading.Lock()
 def _log(message: str) -> None:
     with _LOG_LOCK:
         print(message, flush=True)
+
+
+def _subprocess_kwargs() -> dict:
+    kwargs = {}
+    if os.name == "nt" or sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
 
 
 # ==========================================
@@ -40,6 +49,13 @@ class JpegliCompressionStrategy(CompressionStrategy):
     def compress(self, source_path: Path, output_path: Path, config: dict) -> None:
         magick_path = config.get("magick_path")
         cjpegli_path = config.get("cjpegli_path")
+
+        if not Path(magick_path).exists():
+            raise FileNotFoundError(f"Missing ImageMagick executable at: {magick_path}")
+
+        if not Path(cjpegli_path).exists():
+            raise FileNotFoundError(f"Missing Jpegli executable at: {cjpegli_path}")
+
         quality = config.get("quality", 90)
         strip_metadata = config.get("strip_metadata", False)
         max_resolution = self._build_resize_arg(config)
@@ -72,11 +88,37 @@ class JpegliCompressionStrategy(CompressionStrategy):
         jpegli_cmd = [str(cjpegli_path), "-", str(output_path), "-q", str(quality)]
 
         # 3. Connect processes via pipeline
-        proc_magick = subprocess.Popen(magick_cmd, stdout=subprocess.PIPE)
-        proc_jpegli = subprocess.Popen(jpegli_cmd, stdin=proc_magick.stdout, stdout=subprocess.PIPE)
+        proc_magick = subprocess.Popen(
+            magick_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **_subprocess_kwargs(),
+        )
+        proc_jpegli = subprocess.Popen(
+            jpegli_cmd,
+            stdin=proc_magick.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **_subprocess_kwargs(),
+        )
 
         proc_magick.stdout.close()
-        proc_jpegli.communicate()
+
+        _, jpegli_err = proc_jpegli.communicate()
+        magick_err = proc_magick.stderr.read()
+        return_magick = proc_magick.wait()
+        return_jpegli = proc_jpegli.wait()
+
+        if return_magick != 0:
+            error_msg = magick_err.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"ImageMagick failed (code {return_magick}): {error_msg}")
+
+        if return_jpegli != 0:
+            error_msg = jpegli_err.decode("utf-8", errors="ignore").strip()
+            # Czyszczenie śmieci: jeśli jpegli stworzyło pusty/uszkodzony plik, usuń go
+            if output_path.exists():
+                output_path.unlink()
+            raise RuntimeError(f"Jpegli failed (code {return_jpegli}): {error_msg}")
 
 
 class PngCompressionStrategy(CompressionStrategy):
@@ -116,7 +158,7 @@ class PngCompressionStrategy(CompressionStrategy):
         magick_cmd.append(str(output_path))
 
         # Direct execution since ImageMagick writes straight to disk
-        subprocess.run(magick_cmd, check=True)
+        subprocess.run(magick_cmd, check=True, **_subprocess_kwargs())
 
 
 class UniversalStripMetadataStrategy(CompressionStrategy):
@@ -127,7 +169,7 @@ class UniversalStripMetadataStrategy(CompressionStrategy):
 
         if config.get("strip_metadata", False):
             magick_cmd = [str(magick_path), str(source_path), "-strip", str(output_path)]
-            subprocess.run(magick_cmd, check=True)
+            subprocess.run(magick_cmd, check=True, **_subprocess_kwargs())
         else:
             shutil.copy2(source_path, output_path)
 
@@ -168,7 +210,7 @@ class GifCompressionStrategy(CompressionStrategy):
 
         magick_cmd.append(str(output_path))
 
-        subprocess.run(magick_cmd, check=True)
+        subprocess.run(magick_cmd, check=True, **_subprocess_kwargs())
 
 
 # ==========================================
@@ -180,8 +222,6 @@ class ImageCompressor:
     def __init__(self):
         # Map registering file extensions to their corresponding strategy
         self._strategies = {}
-        self.magick_path = Path(os.getcwd()) / "imageMagick" / "magick.exe"
-        self.cjpegli_path = Path(os.getcwd()) / "jpegli" / "cjpegli.exe"
 
     def register_strategy(self, extension: str, strategy: CompressionStrategy) -> None:
         """Dynamically registers a compression strategy for a specific extension."""
@@ -319,11 +359,24 @@ class ImageCompressor:
                         progress_callback(source_path, FileStatus.UNCONVERTIBLE)
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(process_file, file_info) for file_info in files_list]
-            for future in futures:
+            future_to_file = {}
+            for file_info in files_list:
                 if stop_event and stop_event.is_set():
                     break
-                future.result()
+                future = executor.submit(process_file, file_info)
+                future_to_file[future] = file_info
+
+            for future in as_completed(future_to_file):
+                if stop_event and stop_event.is_set():
+                    for pending_future in future_to_file:
+                        pending_future.cancel()
+                    break
+
+                try:
+                    future.result()
+                except Exception as exc:
+                    file_info = future_to_file[future]
+                    _log(f"Thread execution crashed for {file_info.get('filename')}: {exc}")
 
 
 def create_configured_compressor():

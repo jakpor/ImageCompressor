@@ -161,9 +161,10 @@ class FileManager:
         if entry is None:
             return
         entry["status"] = new_status
-        self.refresh_output_size_for_source(source_path)
+        self._refresh_output_size_for_source(source_path)
+        return entry
 
-    def refresh_output_size_for_source(self, source_path) -> None:
+    def _refresh_output_size_for_source(self, source_path) -> None:
         entry = self._get_matching_entry(source_path)
         if entry is None:
             return
@@ -178,6 +179,7 @@ class FileManager:
         pending_count = sum(1 for f in self.files if f["status"] == FileStatus.PENDING)
         converted_count = sum(1 for f in self.files if f["status"] == FileStatus.DONE)
         unconvertible_count = sum(1 for f in self.files if f["status"] == FileStatus.UNCONVERTIBLE)
+        error_count = sum(1 for f in self.files if f["status"] in {FileStatus.ERROR_COMPRESSION, FileStatus.ERROR_COPY})
         pending_size = sum(f["size_kb"] for f in self.files if f["status"] == FileStatus.PENDING)
         unconvertible_size = sum(f["size_kb"] for f in self.files if f["status"] == FileStatus.UNCONVERTIBLE)
 
@@ -186,6 +188,7 @@ class FileManager:
             "pending_count": pending_count,
             "converted_count": converted_count,
             "unconvertible_count": unconvertible_count,
+            "error_count": error_count,
             "pending_size_mb": round(pending_size / 1024, 2),
             "unconvertible_size_mb": round(unconvertible_size / 1024, 2),
         }
@@ -197,5 +200,6 @@ class FileManager:
             f"Wszystkich plików: {stats['total_count']} | "
             f"Do przetworzenia: {stats['pending_count']} ({stats['pending_size_mb']} MB) | "
             f"Niekonwertowalne: {stats['unconvertible_count']} ({stats['unconvertible_size_mb']} MB) | "
-            f"Przekonwertowane: {stats['converted_count']}"
+            f"Przekonwertowane: {stats['converted_count']} | "
+            f"Błędy: {stats['error_count']}"
         )

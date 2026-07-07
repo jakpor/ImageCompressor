@@ -6,7 +6,6 @@ import tkinter as tk
 from tkinter import StringVar, IntVar
 import customtkinter
 import threading
-from pathlib import Path
 from file_manager import FileManager
 from config_manager import ConfigManager
 from file_table import FileProcessingTable
@@ -99,12 +98,17 @@ class App(customtkinter.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         signal.signal(signal.SIGINT, lambda sig, frame: self.on_closing())
 
-        # Try loading icon safely
+        self.magick_path = None
+        self.cjpegli_path = None
         try:
             icon_path = get_resource_path("press.ico")
-            self.iconbitmap(icon_path)
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
+                self.after(10, lambda: self.wm_iconbitmap(icon_path))
+            self.magick_path = get_resource_path("imageMagick/magick.exe")
+            self.cjpegli_path = get_resource_path("jpegli/cjpegli.exe")
         except Exception:
-            print("Error loading icon.")
+            print("Error loading internal files.")
             pass
 
         # Initialize compressor
@@ -188,15 +192,20 @@ class App(customtkinter.CTk):
         )
 
         # Hooked: Init from config + strict range trace that automatically invokes save_config
-        self.quality = IntVar(value=int(stored_settings["quality"]))
-        self.quality.trace_add("write", lambda *args: self.validate_quality())
+        initial_quality = int(stored_settings.get("quality", 90))
+        self.quality_int = IntVar(value=initial_quality)
+        self.quality_str = StringVar(value=str(initial_quality))
+        self.quality_int.trace_add("write", lambda *args: self._on_slider_move())
+        self.quality_str.trace_add("write", lambda *args: self._validate_quality())
 
         self.slider_quality = customtkinter.CTkSlider(
-            self.strat_quality_container, from_=1, to=100, variable=self.quality, width=150
+            self.strat_quality_container, from_=1, to=100, variable=self.quality_int, width=150
         )
         self.slider_quality.pack(side="left", padx=5)
 
-        self.entry_quality = customtkinter.CTkEntry(self.strat_quality_container, width=50, textvariable=self.quality)
+        self.entry_quality = customtkinter.CTkEntry(
+            self.strat_quality_container, width=50, textvariable=self.quality_str
+        )
         self.entry_quality.pack(side="left", padx=(5, 0))
 
         # === 5. OUTPUT RESOLUTION (Shifted to Row 3) ===
@@ -439,13 +448,29 @@ class App(customtkinter.CTk):
         if path:
             self.output_dir.set(path)
 
-    def validate_quality(self):
+    def _on_slider_move(self) -> None:
         try:
-            val = self.quality.get()
-            if val < 1:
-                self.quality.set(1)
-            elif val > 100:
-                self.quality.set(100)
+            val = self.quality_int.get()
+            if self.quality_str.get() != str(val):
+                self.quality_str.set(str(val))
+                self.save_config()
+        except tk.TclError:
+            pass
+
+    def _validate_quality(self):
+        try:
+            val_str = self.quality_str.get().strip()
+            if val_str == "":
+                return
+            val_int = int(val_str)
+            if val_int < 1:
+                val_int = 1
+            elif val_int > 100:
+                val_int = 100
+            if str(val_int) != val_str:
+                self.quality.set(str(val_int))
+            if self.quality_int.get() != val_int:
+                self.quality_int.set(val_int)
         except tk.TclError:
             return  # Allow blank temporary values while typing
         self.save_config()
@@ -469,7 +494,7 @@ class App(customtkinter.CTk):
                 "source_dir": self.source_dir.get(),
                 "output_dir": self.output_dir.get(),
                 "strategy": self.strategy_var.get(),
-                "quality": str(self.quality.get()),
+                "quality": str(self.quality_int.get()),
                 "resolution_preset": self.res_option_var.get(),
                 "custom_w": self.custom_w_var.get(),
                 "custom_h": self.custom_h_var.get(),
@@ -504,6 +529,7 @@ class App(customtkinter.CTk):
         self._compression_pending = start_compression_after_scan
         self._set_progress_value(0)
         self._set_status_message("Skanowanie katalogu...")
+        self._schedule_ui_drain()
         self.table.clear_table()
 
         def progress_callback(batch):
@@ -526,6 +552,9 @@ class App(customtkinter.CTk):
         if not batch:
             return
         self._refresh_table_with_current_filters()
+
+    def refresh_table_entry(self, entry):
+        self.table.update_row(entry)
 
     def _refresh_table_with_current_filters(self):
         filtered_ui_data = self.file_manager.get_ui_table_data(
@@ -581,18 +610,15 @@ class App(customtkinter.CTk):
         self._start_compression_job()
 
     def _start_compression_job(self):
-        quality = self.quality.get()
+        quality = self.quality_int.get()
         strip_metadata = self.remove_metadata_var.get()
         overwrite_files = self.overwrite_files_var.get()
         copy_uncompressible = self.copy_uncompressible_var.get()
 
-        script_dir = Path(os.getcwd())
-        magick_path = script_dir / "imageMagick" / "magick.exe"
-        cjpegli_path = script_dir / "jpegli" / "cjpegli.exe"
         resolution = self._get_max_resolution_config()
         config = {
-            "magick_path": magick_path,
-            "cjpegli_path": cjpegli_path,
+            "magick_path": self.magick_path,
+            "cjpegli_path": self.cjpegli_path,
             "quality": quality,
             "strip_metadata": strip_metadata,
             "copy_uncompressible": copy_uncompressible,
@@ -610,6 +636,7 @@ class App(customtkinter.CTk):
         self._compression_stop_event = threading.Event()
         self._set_progress_value(0)
         self.compress_in_progress = True
+        self._schedule_ui_drain()
         self._set_compression_button_state(True)
 
         def worker():
@@ -668,6 +695,7 @@ class App(customtkinter.CTk):
         total = len(self.file_manager.files)
         processed = 0
         skipped = 0
+        errors = 0
         saved_kb = 0.0
         for entry in self.file_manager.files:
             status = entry.get("status")
@@ -680,6 +708,8 @@ class App(customtkinter.CTk):
                 processed += 1
             elif status in {FileStatus.EXISTING_PENDING, FileStatus.EXISTING_UNCONVERTIBLE}:
                 skipped += 1
+            if status in {FileStatus.ERROR_COMPRESSION, FileStatus.ERROR_COPY}:
+                errors += 1
             source_size = entry.get("size_kb") or 0
             output_size = entry.get("output_size_kb")
             if output_size is None:
@@ -688,32 +718,31 @@ class App(customtkinter.CTk):
                 saved_kb += source_size - output_size
 
         saved_text = self._format_size(saved_kb)
+        error_suffix = f" Błędy: {errors}." if errors else ""
         if skipped:
             return (
                 f"Kompresja zakończona. Przetworzono {processed}/{total} plików. "
-                f"Pominięto {skipped} plików z powodu istniejących wyników. "
-                f"Zaoszczędzono około {saved_text}."
+                f"Pominięto {skipped} plików z powodu istniejących wyników."
+                f"{error_suffix} Zaoszczędzono około {saved_text}."
             )
-        return f"Kompresja zakończona. Przetworzono {processed}/{total} plików. Zaoszczędzono około {saved_text}."
+        return f"Kompresja zakończona. Przetworzono {processed}/{total} plików.{error_suffix} Zaoszczędzono około {saved_text}."
 
     def _on_file_processed_callback(self, source_path, status: FileStatus):
         self._queue_ui_update("file_status", (str(source_path), status))
 
+    def _schedule_ui_drain(self):
+        if self._ui_queue_active:
+            return
+        self._ui_queue_active = True
+        self.after(0, self._drain_ui_queue)
+
     def _queue_ui_update(self, event_type, payload):
         self.ui_queue.put((event_type, payload))
-        if not self._ui_queue_active:
-            self._ui_queue_active = True
-            self.after(0, self._process_ui_queue)
-
-    def _process_ui_queue(self):
-        if self._pending_refresh:
-            return
-
-        self._pending_refresh = True
-        self.after(50, self._drain_ui_queue)
+        if threading.current_thread() is threading.main_thread():
+            self._schedule_ui_drain()
 
     def _drain_ui_queue(self):
-        self._pending_refresh = False
+        self._ui_queue_active = False
         batch_events = []
         while True:
             try:
@@ -723,6 +752,7 @@ class App(customtkinter.CTk):
             batch_events.append((event_type, payload))
 
         for event_type, payload in batch_events:
+            # self._safe_log("Processing UI event: {} with payload: {}".format(event_type, payload))
             if event_type == "scan_batch":
                 self._refresh_table_from_batch(payload)
                 self._safe_log("Updated table with batch of scanned files")
@@ -735,13 +765,12 @@ class App(customtkinter.CTk):
                 self.progressbar.set(payload)
             elif event_type == "file_status":
                 source_path, status = payload
-                self.file_manager.update_file_status(source_path, status)
-                self.file_manager.refresh_output_size_for_source(source_path)
+                file_entry = self.file_manager.update_file_status(source_path, status)
                 self._processed_file_count += 1
                 if self._total_files_to_process:
                     self._set_progress_value(self._processed_file_count / self._total_files_to_process)
                     self._set_status_message(self.file_manager.get_statistics_summary())
-                    self._refresh_table_with_current_filters()
+                    self.refresh_table_entry(file_entry)
             elif event_type == "compression_complete":
                 self.compress_in_progress = False
                 self._set_compression_button_state(False)
@@ -757,11 +786,10 @@ class App(customtkinter.CTk):
 
         if self.scan_in_progress or self.compress_in_progress:
             if not self.ui_queue.empty():
-                self._process_ui_queue()
+                self._schedule_ui_drain()
             else:
-                self.after(50, self._process_ui_queue)
+                self.after(50, self._drain_ui_queue)
         else:
-            self._ui_queue_active = False
             self._refresh_table_with_current_filters()
             self._set_status_message(self.file_manager.get_statistics_summary())
 

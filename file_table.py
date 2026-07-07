@@ -68,6 +68,12 @@ class FileProcessingTable(customtkinter.CTkScrollableFrame):
             status_val, filename, size_kb, output_size_kb = self._normalize_row(row_data)
             self._create_or_update_row(idx, status_val, filename, size_kb, output_size_kb)
 
+    def update_row(self, entry):
+        status_val, filename, size_kb, output_size_kb = self._normalize_row(entry)
+        self._create_or_update_row(
+            len(self.row_lookup) + 1, status_val, filename, size_kb, output_size_kb, key=filename
+        )
+
     def update_rows_from_entries(self, entries):
         for entry in entries:
             relative_path = entry.get("relative_path") or entry.get("filename")

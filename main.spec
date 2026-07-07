@@ -11,7 +11,9 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(customtkinter_path, "assets"), "customtkinter/assets"),
-        ("press.ico", ".")
+        ("press.ico", "."),
+        ("imageMagick", "imageMagick"),
+        ("jpegli", "jpegli")
     ],
     hiddenimports=[],
     hookspath=[],
@@ -36,7 +38,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
