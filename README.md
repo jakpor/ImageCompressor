@@ -33,9 +33,17 @@ python main.py
 ```
 
 ## Building executable
+
+Executable in build simultaneously in Debug and release modes. Debug has a console outputingthe current operation results.
+
+Building
 ```bash
 pyinstaller main.spec
-# pyinstaller --noconfirm --onefile --windowed main.py
+```
+
+To generate spec file from scratch (not recommended)
+```bash
+pyinstaller --noconfirm --onefile --windowed main.py
 ```
 *Requires `python -m pip install pyinstaller`
 

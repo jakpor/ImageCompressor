@@ -796,7 +796,7 @@ class App(customtkinter.CTk):
             # self._safe_log("Processing UI event: {} with payload: {}".format(event_type, payload))
             if event_type == "scan_complete":
                 self._finalize_scan()
-                self._safe_log("Input directory scan complete")
+                self._safe_log("Input directory scan complete for: {}".format(self.source_dir.get()))
             elif event_type == "status":
                 self.status_var.set(payload)
             elif event_type == "progress":

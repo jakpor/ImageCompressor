@@ -5,6 +5,7 @@ import customtkinter
 
 customtkinter_path = os.path.dirname(customtkinter.__file__)
 
+# Common analysis layout used for both builds
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -25,20 +26,44 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
+# ================= 1. RELEASE VERSION (No Console) =================
+exe_release = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name='Zmniejszacz Obrazów',
+    name='Zmniejszacz Obrazów',       # Standard name
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,                   # Hides the console window
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='press.ico',
+)
+
+# ================= 2. DEBUG VERSION (With Console) =================
+exe_debug = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='Zmniejszacz Obrazów Debug', # Custom debug name suffix
+    debug=True,                       # Enables bootloader debug logs
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,                    # Shows the console window
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
