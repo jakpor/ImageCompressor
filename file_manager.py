@@ -5,6 +5,7 @@ from definitions import SUPPORTED_EXTENSIONS
 
 class FileManager:
     def __init__(self):
+        # Kept the original variable name as requested
         # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ..., "output_size_kb": ... }
         self.files = []
 
@@ -23,33 +24,31 @@ class FileManager:
             return None
         return round(os.path.getsize(destination) / 1024, 1)
 
-    def _get_matching_entry(self, source_path):
+    def _get_matching_entry_and_index(self, source_path):
+        """Helper to find both the dictionary entry and its global index location."""
         target_path = self._normalize_path(source_path)
-        for f in self.files:
+        for idx, f in enumerate(self.files):
             if self._normalize_path(f.get("source_path")) == target_path:
-                return f
+                return f, idx
 
         fallback_name = os.path.basename(str(source_path)) if source_path is not None else None
         if fallback_name:
-            for f in self.files:
+            for idx, f in enumerate(self.files):
                 if f.get("filename") == fallback_name or f.get("relative_path") == str(source_path):
-                    return f
-        return None
+                    return f, idx
+        return None, -1
 
     def scan_directory(
         self,
         source_dir: str,
         strategy: str,
         output_dir: str,
-        progress_callback=None,
-        batch_size: int = 50,
     ) -> list:
         self.files.clear()
         if not source_dir or not os.path.exists(source_dir):
             return []
 
         scan_recursively = strategy in ("zachowaj strukturę podfolderów", "spłaszcz podfoldery")
-        batch = []
 
         if scan_recursively:
             stack = [source_dir]
@@ -63,7 +62,6 @@ class FileManager:
                             elif entry.is_file(follow_symlinks=False):
                                 file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
                                 self.files.append(file_entry)
-                                batch.append(file_entry)
                 except PermissionError:
                     continue
         else:
@@ -73,12 +71,9 @@ class FileManager:
                         if entry.is_file(follow_symlinks=False):
                             file_entry = self._build_file_entry(entry, source_dir, output_dir, strategy)
                             self.files.append(file_entry)
-                            batch.append(file_entry)
             except PermissionError:
                 pass
 
-        if batch:
-            self._emit_progress(progress_callback, batch)
         return self.files
 
     def _build_file_entry(self, entry, source_dir: str, output_dir: str, strategy: str) -> dict:
@@ -125,53 +120,22 @@ class FileManager:
             return FileStatus.EXISTING_PENDING if status == FileStatus.PENDING else FileStatus.EXISTING_UNCONVERTIBLE
         return status
 
-    def _emit_progress(self, progress_callback, batch: list) -> None:
-        if progress_callback:
-            progress_callback(batch)
-
-    def get_ui_table_data(self, show_conv: bool = True, show_non_conv: bool = True, show_done: bool = True) -> list:
-        MAX_ROWS = 100
-        filtered_view = []
-        current_row = 0
-        for f in self.files:
-            current_status = f["status"]
-            if current_status == FileStatus.DONE and not show_done:
-                continue
-            if (
-                current_status == FileStatus.PENDING or current_status == FileStatus.EXISTING_PENDING
-            ) and not show_conv:
-                continue
-            if (
-                current_status == FileStatus.UNCONVERTIBLE or current_status == FileStatus.EXISTING_UNCONVERTIBLE
-            ) and not show_non_conv:
-                continue
-
-            filtered_view.append((f["status"], f["relative_path"], f["size_kb"], f.get("output_size_kb")))
-            current_row += 1
-            if current_row >= MAX_ROWS:
-                break
-
-        return filtered_view
-
     def get_files_for_compressor(self) -> list:
         return self.files
 
-    def update_file_status(self, source_path, new_status: FileStatus) -> None:
-        entry = self._get_matching_entry(source_path)
-        if entry is None:
-            return
-        entry["status"] = new_status
-        self._refresh_output_size_for_source(source_path)
-        return entry
+    def update_file_status(self, source_path, new_status: FileStatus) -> int:
+        """Updates status, size, and returns the global index of the file for targeted UI sync."""
+        entry, global_idx = self._get_matching_entry_and_index(source_path)
+        if global_idx == -1:
+            return -1
 
-    def _refresh_output_size_for_source(self, source_path) -> None:
-        entry = self._get_matching_entry(source_path)
-        if entry is None:
-            return
+        entry["status"] = new_status
         entry["output_size_kb"] = self._get_output_size_kb(entry.get("destination"))
+        return global_idx
 
     def get_file_entry(self, source_path) -> dict | None:
-        return self._get_matching_entry(source_path)
+        entry, _ = self._get_matching_entry_and_index(source_path)
+        return entry
 
     def get_statistics(self) -> dict:
         """Returns metadata about the scanned set for the status bar."""

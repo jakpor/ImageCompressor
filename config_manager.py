@@ -22,8 +22,10 @@ class ConfigManager:
             "show_convertible": "True",
             "show_non_convertible": "True",
             "show_converted": "True",
+            "show_errors": "True",
             "remove_metadata": "False",
             "worker_count": "4",
+            "page_size": "50",
         }
 
         if not os.path.exists(self.filename):

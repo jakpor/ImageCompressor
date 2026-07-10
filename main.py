@@ -8,7 +8,7 @@ import customtkinter
 import threading
 from file_manager import FileManager
 from config_manager import ConfigManager
-from file_table import FileProcessingTable
+from file_table import FileProcessingTable, FilterConfig
 from compressor import create_configured_compressor
 from definitions import FileStatus
 
@@ -355,33 +355,38 @@ class App(customtkinter.CTk):
         self.frame_filter = customtkinter.CTkFrame(master=self, corner_radius=8)
         self.frame_filter.grid(row=2, column=0, sticky="ew", padx=15, pady=(5, 10))
 
-        # Enforce exact label column alignment to match top settings margins
-        self.frame_filter.grid_columnconfigure(0, weight=0, minsize=180)
+        # Optimized columns for width=900 (reduced left column minsize from 180 to 130)
+        self.frame_filter.grid_columnconfigure(0, weight=0, minsize=130)
         self.frame_filter.grid_columnconfigure(1, weight=1)
 
         self.label_filter = customtkinter.CTkLabel(self.frame_filter, text="Wyświetl pliki:", font=("Roboto", 14))
         CTkTooltip(
             self.label_filter,
-            "Filtruj wyświetlane pliki w tabeli. Możesz wybrać, czy chcesz widzieć tylko pliki konwertowalne, niekonwertowalne lub już skonwertowane.\nTabela zawiera tylko 100 pierwszych plików, więc jeśli nie widzisz wszystkich, użyj filtrów by je znaleźć.",
+            "Filtruj wyświetlane pliki w tabeli. Możesz wybrać, czy chcesz widzieć pliki konwertowalne, niekonwertowalne, skonwertowane lub błędy.\nTabela wyświetla pliki stronicami, użyj strzałek po prawej stronie, aby przełączać strony.",
         )
-        self.label_filter.grid(row=0, column=0, pady=10, padx=15, sticky="w")
+        self.label_filter.grid(row=0, column=0, pady=10, padx=10, sticky="w")
 
-        # Container framework to map checkboxes inline horizontally
+        # Container framework to map checkboxes and navigation inline horizontally
         self.filter_container = customtkinter.CTkFrame(self.frame_filter, fg_color="transparent")
-        self.filter_container.grid(row=0, column=1, pady=10, padx=10, sticky="w")
+        self.filter_container.grid(row=0, column=1, pady=10, padx=(0, 10), sticky="ew")
 
         # State tracking configurations for functional table view hooks
         initial_show_convertible = stored_settings.get("show_convertible", "False") == "True"
         initial_show_non_convertible = stored_settings.get("show_non_convertible", "False") == "True"
         initial_show_converted = stored_settings.get("show_converted", "False") == "True"
+        initial_show_errors = stored_settings.get("show_errors", "False") == "True"
+        self.page_size = int(stored_settings.get("page_size", 50))
+
         self.show_convertible = customtkinter.BooleanVar(value=initial_show_convertible)
         self.show_non_convertible = customtkinter.BooleanVar(value=initial_show_non_convertible)
         self.show_converted = customtkinter.BooleanVar(value=initial_show_converted)
+        self.show_errors = customtkinter.BooleanVar(value=initial_show_errors)
 
+        # Checkboxes with tighter horizontal padding (padx=8 instead of 15) to preserve space
         self.chk_convertible = customtkinter.CTkCheckBox(
             self.filter_container, text="konwertowalne", variable=self.show_convertible, command=self.on_filter_changed
         )
-        self.chk_convertible.pack(side="left", padx=(0, 15))
+        self.chk_convertible.pack(side="left", padx=(0, 8))
 
         self.chk_non_convertible = customtkinter.CTkCheckBox(
             self.filter_container,
@@ -389,12 +394,53 @@ class App(customtkinter.CTk):
             variable=self.show_non_convertible,
             command=self.on_filter_changed,
         )
-        self.chk_non_convertible.pack(side="left", padx=15)
+        self.chk_non_convertible.pack(side="left", padx=8)
 
         self.chk_converted = customtkinter.CTkCheckBox(
             self.filter_container, text="skonwertowane", variable=self.show_converted, command=self.on_filter_changed
         )
-        self.chk_converted.pack(side="left", padx=15)
+        self.chk_converted.pack(side="left", padx=8)
+
+        self.chk_errors = customtkinter.CTkCheckBox(
+            self.filter_container, text="błędy", variable=self.show_errors, command=self.on_filter_changed
+        )
+        self.chk_errors.pack(side="left", padx=8)
+
+        # ================= PAGINATION NAVIGATION =================
+        self.current_page = 1
+        self.total_pages = 1
+
+        # Pagination sub-container placed at the far RIGHT of the bar
+        self.pagination_container = customtkinter.CTkFrame(self.filter_container, fg_color="transparent")
+        self.pagination_container.pack(side="right", padx=(5, 0))
+
+        # Left arrow button to go to previous page
+        self.btn_prev_page = customtkinter.CTkButton(
+            self.pagination_container,
+            text="←",
+            width=25,  # Slightly narrower button
+            height=26,
+            font=("Roboto", 12, "bold"),
+            command=self.on_prev_page,
+        )
+        self.btn_prev_page.pack(side="left", padx=2)
+
+        # Central label displaying current position
+        self.lbl_page_number = customtkinter.CTkLabel(
+            self.pagination_container, text=f"Strona {self.current_page} z {self.total_pages}", font=("Roboto", 12)
+        )
+        self.lbl_page_number.pack(side="left", padx=6)
+
+        # Right arrow button to go to next page
+        self.btn_next_page = customtkinter.CTkButton(
+            self.pagination_container,
+            text="→",
+            width=25,  # Slightly narrower button
+            height=26,
+            font=("Roboto", 12, "bold"),
+            command=self.on_next_page,
+        )
+        self.btn_next_page.pack(side="left", padx=2)
 
         # ================= MIDDLE FRAME: File Table =================
         # Row layout configuration update: row 3 is now the table
@@ -406,7 +452,7 @@ class App(customtkinter.CTk):
         self.frame_middle.grid_columnconfigure(0, weight=1)
 
         # Inicjalizacja nowej tabeli wewnątrz środkowej ramki
-        self.table = FileProcessingTable(master=self.frame_middle)
+        self.table = FileProcessingTable(master=self.frame_middle, manager=self.file_manager)
         self.table.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # ================= BOTTOM FRAME: Status Bar (At the very bottom) =================
@@ -503,6 +549,7 @@ class App(customtkinter.CTk):
                 "show_convertible": str(self.show_convertible.get()),
                 "show_non_convertible": str(self.show_non_convertible.get()),
                 "show_converted": str(self.show_converted.get()),
+                "show_errors": str(self.show_errors.get()),
                 "remove_metadata": str(self.remove_metadata_var.get()),
                 "worker_count": self.worker_count_var.get(),
             }
@@ -532,14 +579,11 @@ class App(customtkinter.CTk):
         self._schedule_ui_drain()
         self.table.clear_table()
 
-        def progress_callback(batch):
-            self._queue_ui_update("scan_batch", batch)
-
         def async_scan():
             try:
                 if self._shutdown_event.is_set():
                     return
-                self.file_manager.scan_directory(src, strat, dest, progress_callback=progress_callback, batch_size=50)
+                self.file_manager.scan_directory(src, strat, dest)
             finally:
                 if not self._shutdown_event.is_set():
                     self._queue_ui_update("scan_complete", None)
@@ -548,28 +592,25 @@ class App(customtkinter.CTk):
         self.threads.append(thread)
         thread.start()
 
-    def _refresh_table_from_batch(self, batch):
-        if not batch:
-            return
-        self._refresh_table_with_current_filters()
-
-    def refresh_table_entry(self, entry):
-        self.table.update_row(entry)
-
-    def _refresh_table_with_current_filters(self):
-        filtered_ui_data = self.file_manager.get_ui_table_data(
+    def _refresh_table_with_current_filters(self, force_refresh=False):
+        filter_config = FilterConfig(
             show_conv=self.show_convertible.get(),
             show_non_conv=self.show_non_convertible.get(),
             show_done=self.show_converted.get(),
+            show_errors=self.show_errors.get(),
+            page_number=self.current_page,
+            page_size=self.page_size,
         )
-        self.table.populate_data(filtered_ui_data)
+        self.table.populate_from_manager(filter_config, force_refresh)
         self.table.update_idletasks()
 
     def _finalize_scan(self):
         self.scan_in_progress = False
         self._set_progress_value(1)
         self._set_status_message("Skanowanie katalogu zakończone")
-        self._refresh_table_with_current_filters()
+        self.total_pages = max(1, (len(self.file_manager.files) + self.page_size - 1) // self.page_size)
+        self.update_pagination_display()
+        self._refresh_table_with_current_filters(force_refresh=True)
         if self._compression_pending:
             self._compression_pending = False
             self._start_compression_job()
@@ -753,10 +794,7 @@ class App(customtkinter.CTk):
 
         for event_type, payload in batch_events:
             # self._safe_log("Processing UI event: {} with payload: {}".format(event_type, payload))
-            if event_type == "scan_batch":
-                self._refresh_table_from_batch(payload)
-                self._safe_log("Updated table with batch of scanned files")
-            elif event_type == "scan_complete":
+            if event_type == "scan_complete":
                 self._finalize_scan()
                 self._safe_log("Input directory scan complete")
             elif event_type == "status":
@@ -765,12 +803,12 @@ class App(customtkinter.CTk):
                 self.progressbar.set(payload)
             elif event_type == "file_status":
                 source_path, status = payload
-                file_entry = self.file_manager.update_file_status(source_path, status)
+                global_idx = self.file_manager.update_file_status(source_path, status)
                 self._processed_file_count += 1
                 if self._total_files_to_process:
                     self._set_progress_value(self._processed_file_count / self._total_files_to_process)
                     self._set_status_message(self.file_manager.get_statistics_summary())
-                    self.refresh_table_entry(file_entry)
+                    self.table.update_single_index(global_idx)
             elif event_type == "compression_complete":
                 self.compress_in_progress = False
                 self._set_compression_button_state(False)
@@ -792,6 +830,33 @@ class App(customtkinter.CTk):
         else:
             self._refresh_table_with_current_filters()
             self._set_status_message(self.file_manager.get_statistics_summary())
+
+    def on_prev_page(self):
+        """Navigates to the previous file table page if available."""
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._refresh_table_with_current_filters()
+            self.update_pagination_display()
+
+    def on_next_page(self):
+        """Navigates to the next file table page if available."""
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self._refresh_table_with_current_filters()
+            self.update_pagination_display()
+
+    def update_pagination_display(self):
+        """Updates the total page count and state of navigation buttons."""
+        # Clamp current page if changes in filters made it out of bounds
+        if self.current_page > self.total_pages:
+            self.current_page = self.total_pages
+
+        # Update text string
+        self.lbl_page_number.configure(text=f"Strona {self.current_page} z {self.total_pages}")
+
+        # Intercept and toggle button states to prevent invalid interactions
+        self.btn_prev_page.configure(state="normal" if self.current_page > 1 else "disabled")
+        self.btn_next_page.configure(state="normal" if self.current_page < self.total_pages else "disabled")
 
     def on_closing(self):
         self._shutdown_event.set()
