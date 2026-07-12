@@ -24,23 +24,23 @@ class CTkTooltip:
         self.widget = widget
         self.text = text
         self.tip_window = None
-        # Bindowanie zdarzeń najechania myszką
+        # Bin mouse hover action
         self.widget.bind("<Enter>", self.show_tip)
         self.widget.bind("<Leave>", self.hide_tip)
 
     def show_tip(self, event=None):
         if self.tip_window or not self.text:
             return
-        # Pobieranie pozycji widgetu na ekranie
+        # Get widget position on the screen
         x = self.widget.winfo_rootx() + 20
         y = self.widget.winfo_rooty() + 25
 
-        # Tworzenie małego okna bez obramowania systemowego
+        # Create tooltip window
         self.tip_window = tk.Toplevel(self.widget)
         self.tip_window.wm_overrideredirect(True)
         self.tip_window.wm_geometry(f"+{x}+{y}")
 
-        # Etykieta z tekstem podpowiedzi (styl dopasowany do ciemnego/jasnego motywu)
+        # Label with text and styling based on the current theme
         is_dark = customtkinter.get_appearance_mode() == "Dark"
         bg_color = "#2b2b2b" if is_dark else "#e5e5e5"
         fg_color = "white" if is_dark else "black"
@@ -122,7 +122,7 @@ class App(customtkinter.CTk):
         self.frame_top = customtkinter.CTkFrame(master=self, corner_radius=8)
         self.frame_top.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
 
-        # Exact column layout rules that force everything to align properly
+        # Exact column layout rules that force everything to align
         self.frame_top.grid_columnconfigure(0, weight=0, minsize=180)
         self.frame_top.grid_columnconfigure(1, weight=1)
         self.frame_top.grid_columnconfigure(2, weight=0)
@@ -158,11 +158,9 @@ class App(customtkinter.CTk):
         self.btn_out.grid(row=1, column=2, pady=8, padx=15)
 
         # === 3. SUBFOLDER STRATEGY & 4. QUALITY SETTINGS (Combined in Row 2) ===
-        # Place the main label directly in column 0 of frame_top for perfect alignment
         self.label_strat = customtkinter.CTkLabel(self.frame_top, text="Struktura folderów:", font=("Roboto", 14))
         self.label_strat.grid(row=2, column=0, pady=8, padx=15, sticky="w")
 
-        # Create a container ONLY for the interactive fields to live in column 1 and 2 spanned
         self.strat_quality_container = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
         self.strat_quality_container.grid(row=2, column=1, columnspan=2, pady=8, padx=10, sticky="w")
 
@@ -212,7 +210,6 @@ class App(customtkinter.CTk):
         self.label_res = customtkinter.CTkLabel(self.frame_top, text="Rozdzielczość maksymalna:", font=("Roboto", 14))
         self.label_res.grid(row=3, column=0, pady=8, padx=15, sticky="w")
 
-        # Container frame to align dropdown, custom inputs and checkbox horizontally
         self.res_container = customtkinter.CTkFrame(self.frame_top, fg_color="transparent")
         self.res_container.grid(row=3, column=1, columnspan=2, pady=8, padx=10, sticky="w")
 
@@ -307,7 +304,7 @@ class App(customtkinter.CTk):
         self.cb_overwrite_files.pack(side="left", padx=15, anchor="center")
         CTkTooltip(self.cb_overwrite_files, "Zaznacz by nadpisać już skompresowane pliki w folderze wyjściowym")
 
-        # 7. Checkbox - Usuń metadane
+        # 8. Checkbox - Remove metadata
         initial_remove_metadata_value = stored_settings.get("remove_metadata", "False") == "True"
         self.remove_metadata_var = tk.BooleanVar(value=initial_remove_metadata_value)
         self.cb_remove_metadata = customtkinter.CTkCheckBox(
@@ -327,7 +324,6 @@ class App(customtkinter.CTk):
         self.frame_controls.grid(row=1, column=0, sticky="ew", padx=15, pady=(5, 10))
         self.frame_controls.columnconfigure((0, 1), weight=1)
 
-        # Big, prominent action buttons
         self.btn_load = customtkinter.CTkButton(
             self.frame_controls,
             text="Wczytaj pliki",
@@ -338,6 +334,7 @@ class App(customtkinter.CTk):
             command=self.load_files_btn,
         )
         self.btn_load.grid(row=0, column=0, pady=5, padx=(0, 10), sticky="ew")
+        # CTkTooltip(self.btn_load, "Wczytaj pliki do kompresji")
 
         self.btn_start_comp = customtkinter.CTkButton(
             self.frame_controls,
@@ -349,6 +346,10 @@ class App(customtkinter.CTk):
             command=self.toggle_compression,
         )
         self.btn_start_comp.grid(row=0, column=1, pady=5, padx=(10, 0), sticky="ew")
+        # CTkTooltip(
+        #     self.btn_start_comp,
+        #     "Rozpocznij proces kompresji plików - zmniejsza rozmiar obrazów i zapisuje je do folderu wyjściowego",
+        # )
 
         # ================= FILE SELECTION FILTER ROW (Row 2) =================
         # Placed after control frame, directly before the file frame
@@ -829,7 +830,7 @@ class App(customtkinter.CTk):
                 self.after(50, self._drain_ui_queue)
         else:
             self._refresh_table_with_current_filters()
-            self._set_status_message(self.file_manager.get_statistics_summary())
+            # self._set_status_message(self.file_manager.get_statistics_summary())
 
     def on_prev_page(self):
         """Navigates to the previous file table page if available."""

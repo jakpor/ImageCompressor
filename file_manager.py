@@ -5,7 +5,6 @@ from definitions import SUPPORTED_EXTENSIONS
 
 class FileManager:
     def __init__(self):
-        # Kept the original variable name as requested
         # Master list stores dicts: { "source_path": ..., "relative_path": ..., "filename": ..., "size_kb": ..., "status": ..., "output_size_kb": ... }
         self.files = []
 
